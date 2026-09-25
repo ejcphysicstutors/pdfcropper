@@ -76,6 +76,8 @@ function App() {
   const [showGuides, setShowGuides] = useState(true);
   const [selectedQuestionId, setSelectedQuestionId] = useState(null);
   const [selectedLineId, setSelectedLineId] = useState(null);
+  const [selectedSegmentId, setSelectedSegmentId] = useState(null);
+  const [segmentLabelOverrides, setSegmentLabelOverrides] = useState({});
   const [lastSuggestionIds, setLastSuggestionIds] = useState([]);
   const [viewMode, setViewMode] = useState('segment');
   const [outputBreaks, setOutputBreaks] = useState({});
@@ -270,9 +272,15 @@ function App() {
       const bottom = 1 - footerPct / 100;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom || row.xNorm > 0.30) continue;
-        const match = row.text.match(/^(?:\d{1,2}\s+)?\(([a-z])\)(?=\s|$)/i);
-        if (!match) continue;
-        parts.push({ page: pageData.pageNumber, y: round4(Math.max(top + 0.004, row.yNorm - 0.009)), raw: `(${match[1].toLowerCase()})` });
+        const alphaRoman = row.text.match(/^(?:\d{1,2}\s+)?\(([a-h])\)\s*\(([ivxlcdm]+)\)(?=\s|$)/i);
+        const alpha = row.text.match(/^(?:\d{1,2}\s+)?\(([a-h])\)(?=\s|$)/i);
+        const roman = row.text.match(/^\(([ivxlcdm]+)\)(?=\s|$)/i);
+        let raw = null;
+        if (alphaRoman) raw = `(${alphaRoman[1].toLowerCase()})(${alphaRoman[2].toLowerCase()})`;
+        else if (alpha) raw = `(${alpha[1].toLowerCase()})`;
+        else if (roman) raw = `(${roman[1].toLowerCase()})`;
+        if (!raw) continue;
+        parts.push({ page: pageData.pageNumber, y: round4(Math.max(top + 0.004, row.yNorm - 0.009)), raw });
       }
     }
     return parts.sort(comparePos).filter((candidate, idx, arr) => idx === 0 || Math.abs(posKey(candidate) - posKey(arr[idx - 1])) > 150);
@@ -322,10 +330,11 @@ function App() {
       candidates.push({ id: makeId(START), page: start.page, y: start.y, kind: START, label: start.label, manualLabel: false, source: 'suggested', questionIndex: index });
       candidates.push({ id: makeId(END), page: end.page, y: safeY(end.y), kind: END, label: '', manualLabel: false, source: 'suggested', questionIndex: index });
 
-      rawParts.filter((part) => within(part, start, end) && Math.abs(posKey(part) - posKey(start)) > 180).forEach((part) => {
+      const questionPartStarts = rawParts.filter((part) => within(part, start, end) && Math.abs(posKey(part) - posKey(start)) > 180);
+      questionPartStarts.slice(1).forEach((part) => {
         candidates.push({
           id: makeId(PART), page: part.page, y: part.y, kind: PART,
-          label: `${start.label}${part.raw}`, manualLabel: false, source: 'suggested', questionIndex: index,
+          label: '', manualLabel: false, source: 'suggested', questionIndex: index,
         });
       });
     });
@@ -349,6 +358,39 @@ function App() {
   const regions = useMemo(() => {
     const ordered = [...lines].sort(comparePos);
     const starts = ordered.filter((line) => line.kind === START);
+
+    function rowsInside(start, end) {
+      const found = [];
+      for (const pageData of pages) {
+        if (pageData.pageNumber < start.page || pageData.pageNumber > end.page) continue;
+        for (const row of pageData.rows || []) {
+          const pos = { page: pageData.pageNumber, y: row.yNorm };
+          if (comparePos(pos, start) >= 0 && comparePos(pos, end) < 0) found.push({ ...row, page: pageData.pageNumber });
+        }
+      }
+      return found.sort((a, b) => comparePos({ page: a.page, y: a.yNorm }, { page: b.page, y: b.yNorm }));
+    }
+
+    function markerForSegment(start, end) {
+      const rows = rowsInside(start, end);
+      let alpha = null;
+      let roman = null;
+      for (const row of rows) {
+        const alphaRoman = row.text.match(/(?:^|\s)\(([a-h])\)\s*\(([ivxlcdm]+)\)(?=\s|$)/i);
+        if (alphaRoman) return { alpha: alphaRoman[1].toLowerCase(), roman: alphaRoman[2].toLowerCase() };
+        if (!alpha) {
+          const alphaMatch = row.text.match(/(?:^|\s)\(([a-h])\)(?=\s|$)/i);
+          if (alphaMatch) alpha = alphaMatch[1].toLowerCase();
+        }
+        if (!roman) {
+          const romanMatch = row.text.match(/(?:^|\s)\(([ivxlcdm]+)\)(?=\s|$)/i);
+          if (romanMatch) roman = romanMatch[1].toLowerCase();
+        }
+        if (alpha && roman) break;
+      }
+      return { alpha, roman };
+    }
+
     return starts.map((start, index) => {
       const nextStart = starts[index + 1] || null;
       const end = ordered.find((line) => line.kind === END && comparePos(line, start) > 0 && (!nextStart || comparePos(line, nextStart) < 0));
@@ -360,9 +402,34 @@ function App() {
       const finalEnd = end || { ...fallbackEnd, id: null, kind: END, virtual: true };
       const fallbackLabel = start.label || `Q${index + 1}`;
       const parts = ordered.filter((line) => line.kind === PART && within(line, start, finalEnd));
-      return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end), label: fallbackLabel, parts };
+      const boundaries = [start, ...parts];
+      let currentAlpha = null;
+      let currentRoman = null;
+      const segments = boundaries.map((boundary, segmentIndex) => {
+        const segmentEnd = segmentIndex < parts.length ? parts[segmentIndex] : finalEnd;
+        const marker = markerForSegment(boundary, segmentEnd);
+        if (marker.alpha) {
+          currentAlpha = marker.alpha;
+          currentRoman = marker.roman || null;
+        } else if (marker.roman) {
+          currentRoman = marker.roman;
+        }
+        let inferred = fallbackLabel;
+        if (currentAlpha) inferred += `(${currentAlpha})`;
+        if (currentRoman) inferred += `(${currentRoman})`;
+        const override = segmentLabelOverrides[boundary.id];
+        return {
+          id: boundary.id,
+          start: boundary,
+          end: segmentEnd,
+          label: override || inferred || `${fallbackLabel} part ${segmentIndex + 1}`,
+          autoLabel: inferred,
+          labelEditedByUser: Boolean(override),
+        };
+      });
+      return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end), label: fallbackLabel, parts, segments };
     });
-  }, [lines, footerPct, pages.length]);
+  }, [lines, footerPct, pages, segmentLabelOverrides]);
 
   useEffect(() => {
     if (!regions.length) { setSelectedQuestionId(null); return; }
@@ -382,9 +449,14 @@ function App() {
         label: region.label,
         start: { page: region.start.page, yFractionFromTop: round4(region.start.y) },
         end: { page: region.end.page, yFractionFromTop: round4(region.end.y), explicit: region.endExplicit },
-        parts: region.parts.map((part, idx) => ({
-          label: part.label || `${region.label}(${String.fromCharCode(97 + idx)})`,
+        parts: region.parts.map((part) => ({
           start: { page: part.page, yFractionFromTop: round4(part.y) },
+        })),
+        segments: region.segments.map((segment) => ({
+          label: segment.label,
+          labelEditedByUser: Boolean(segment.labelEditedByUser),
+          start: { page: segment.start.page, yFractionFromTop: round4(segment.start.y) },
+          end: { page: segment.end.page, yFractionFromTop: round4(segment.end.y) },
         })),
         outputPageBreakFractions: (outputBreaks[region.id] || []).map(round4),
         excludedOutputRanges: (exclusions[region.id] || []).map((range) => ({ startFraction: round4(range.start), endFraction: round4(range.end) })),
@@ -411,6 +483,11 @@ function App() {
   }
 
   const selectedRegion = regions.find((region) => region.id === selectedQuestionId) || null;
+
+  useEffect(() => {
+    if (!selectedRegion?.segments?.length) { setSelectedSegmentId(null); return; }
+    if (!selectedRegion.segments.some((segment) => segment.id === selectedSegmentId)) setSelectedSegmentId(selectedRegion.segments[0].id);
+  }, [selectedRegion, selectedSegmentId]);
   const counts = useMemo(() => ({
     start: lines.filter((l) => l.kind === START).length,
     end: lines.filter((l) => l.kind === END).length,
@@ -484,9 +561,21 @@ function App() {
                 {selectedRegion && (
                   <div className="label-editor">
                     <label>Question label<input value={selectedRegion.start.label || selectedRegion.label} onChange={(e) => updateLineLabel(selectedRegion.start.id, e.target.value)} /></label>
-                    {selectedRegion.parts.map((part, idx) => (
-                      <label key={part.id}>Part {idx + 1}<input value={part.label || `${selectedRegion.label}(${String.fromCharCode(97 + idx)})`} onChange={(e) => updateLineLabel(part.id, e.target.value)} /></label>
+                    <div className="segment-label-list">
+                      {selectedRegion.segments.map((segment) => (
+                        <button key={segment.id} type="button" className={`segment-label-row ${selectedSegmentId === segment.id ? 'selected' : ''}`} onClick={() => setSelectedSegmentId(segment.id)}>
+                          <span>{segment.label}</span><small>{segment.labelEditedByUser ? 'edited' : 'auto'}</small>
+                        </button>
+                      ))}
+                    </div>
+                    {selectedRegion.segments.map((segment) => selectedSegmentId === segment.id && (
+                      <label key={`edit-${segment.id}`}>Selected segment
+                        <input value={segment.label} onChange={(e) => setSegmentLabelOverrides((current) => ({ ...current, [segment.id]: e.target.value }))} />
+                      </label>
                     ))}
+                    {selectedSegmentId && segmentLabelOverrides[selectedSegmentId] && (
+                      <button type="button" className="ghost full" onClick={() => setSegmentLabelOverrides((current) => { const next = { ...current }; delete next[selectedSegmentId]; return next; })}>Use automatic label</button>
+                    )}
                   </div>
                 )}
               </section>
@@ -538,7 +627,8 @@ function App() {
                 {pages.map((pageData) => (
                   <PdfPage key={pageData.pageNumber} pageData={pageData} headerPct={headerPct} footerPct={footerPct}
                     lines={lines.filter((line) => line.page === pageData.pageNumber)} lineMode={heldLineMode || lineMode} onAddLine={addLine}
-                    onMoveLine={moveLine} onRemoveLine={removeLine} showGuides={showGuides} regions={regions} selectedLineId={selectedLineId} onSelectLine={setSelectedLineId} />
+                    onMoveLine={moveLine} onRemoveLine={removeLine} showGuides={showGuides} regions={regions} selectedLineId={selectedLineId} onSelectLine={setSelectedLineId}
+                    selectedQuestionId={selectedQuestionId} selectedSegmentId={selectedSegmentId} onSelectSegment={(regionId, segmentId) => { setSelectedQuestionId(regionId); setSelectedSegmentId(segmentId); }} />
                 ))}
               </div>
             </div>
@@ -558,7 +648,7 @@ function App() {
   );
 }
 
-function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, onMoveLine, onRemoveLine, showGuides, regions, selectedLineId, onSelectLine }) {
+function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, onMoveLine, onRemoveLine, showGuides, regions, selectedLineId, onSelectLine, selectedQuestionId, selectedSegmentId, onSelectSegment }) {
   const canvasRef = useRef(null);
   const frameRef = useRef(null);
   const [renderSize, setRenderSize] = useState({ width: pageData.viewport.width, height: pageData.viewport.height });
@@ -610,7 +700,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
   }
 
   function displayText(line) {
-    if (line.kind === PART) return line.label || 'PART';
+    if (line.kind === PART) return 'PART';
     if (line.kind === START) {
       const region = regions.find((r) => r.start.id === line.id);
       return `START ${region?.label || line.label || 'Q'}`;
@@ -625,6 +715,19 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
       <div ref={frameRef} className="page-frame" style={{ width: renderSize.width, height: frameHeight }} onClick={(e) => { if (!e.target.closest('.crop-line')) onAddLine(pageData.pageNumber, eventToYNorm(e), lineMode); }}>
         <canvas ref={canvasRef} style={{ top: canvasTop }} />
         {showGuides && <><div className="crop-guide top-guide"><span>header removed</span></div><div className="crop-guide bottom-guide"><span>footer removed</span></div></>}
+        {regions.flatMap((region) => (region.segments || []).map((segment) => ({ region, segment }))).filter(({ segment }) => segment.start.page <= pageData.pageNumber && segment.end.page >= pageData.pageNumber).map(({ region, segment }) => {
+          const topNorm = segment.start.page === pageData.pageNumber ? Math.max(segment.start.y, visibleTop) : visibleTop;
+          const bottomNorm = segment.end.page === pageData.pageNumber ? Math.min(segment.end.y, visibleBottom) : visibleBottom;
+          if (bottomNorm <= topNorm) return null;
+          const topPct = ((topNorm - visibleTop) / visibleHeight) * 100;
+          const heightPct = ((bottomNorm - topNorm) / visibleHeight) * 100;
+          const selected = selectedQuestionId === region.id && selectedSegmentId === segment.id;
+          return (
+            <div key={`${region.id}-${segment.id}-${pageData.pageNumber}`} className={`segment-overlay ${selected ? 'selected' : ''}`} style={{ top: `${topPct}%`, height: `${heightPct}%` }}>
+              <button type="button" className="segment-watermark" onClick={(e) => { e.stopPropagation(); onSelectSegment(region.id, segment.id); }} title="Click to edit this segment label">{segment.label}</button>
+            </div>
+          );
+        })}
         {lines.map((line) => {
           const yVisible = ((line.y - visibleTop) / visibleHeight) * 100;
           return (
@@ -686,7 +789,8 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, trimOverr
     const map = pageMaps.find((candidate) => candidate.page === part.page);
     if (!map) return null;
     const local = clamp((part.y - map.top) / Math.max(0.0001, map.bottom - map.top), 0, 1);
-    return { id: part.id, label: part.label || 'Part', fraction: round4((map.startY + local * map.height) / strip.height) };
+    const segment = region.segments?.find((candidate) => candidate.start.id === part.id);
+    return { id: part.id, label: segment?.label || 'Part', fraction: round4((map.startY + local * map.height) / strip.height) };
   }).filter(Boolean);
 
   return { dataUrl: strip.toDataURL('image/jpeg', 0.94), canvas: strip, width: strip.width, height: strip.height, partFractions };
