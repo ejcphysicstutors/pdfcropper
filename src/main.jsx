@@ -511,21 +511,43 @@ function App() {
       const fallbackLabel = start.label || `Q${index + 1}`;
       const parts = ordered.filter((line) => line.kind === PART && within(line, start, finalEnd));
       const boundaries = [start, ...parts];
+
+      // Read all printed markers first so one segment can use the next segment as
+      // context. This matters for layouts such as "(d) ... (i)" followed by a
+      // blue boundary at "(ii)": the first segment is naturally Qn(d)(i), even
+      // when PDF text extraction only exposes the leading "(d)" clearly.
+      const segmentMarkers = boundaries.map((boundary, segmentIndex) => {
+        const segmentEnd = segmentIndex < parts.length ? parts[segmentIndex] : finalEnd;
+        return markerForSegment(boundary, segmentEnd);
+      });
+
       let currentAlpha = null;
       let currentRoman = null;
       const segments = boundaries.map((boundary, segmentIndex) => {
         const segmentEnd = segmentIndex < parts.length ? parts[segmentIndex] : finalEnd;
-        const marker = markerForSegment(boundary, segmentEnd);
+        const marker = segmentMarkers[segmentIndex];
+        const nextMarker = segmentMarkers[segmentIndex + 1] || null;
         let evidence = 'No printed part marker found';
         let inferred = null;
 
         if (marker.alpha) {
           currentAlpha = marker.alpha;
-          currentRoman = marker.roman || null;
+
+          // If this segment is detected only as (d), but the next segment is
+          // explicitly (ii) or (d)(ii), infer that this segment is (d)(i).
+          // This mirrors how structured exam questions are conventionally laid
+          // out: the alphabetic stem and subpart (i) often begin together.
+          const nextImpliesFirstRoman = !marker.roman
+            && nextMarker?.roman === 'ii'
+            && (!nextMarker.alpha || nextMarker.alpha === marker.alpha);
+
+          currentRoman = marker.roman || (nextImpliesFirstRoman ? 'i' : null);
           inferred = `${fallbackLabel}(${currentAlpha})${currentRoman ? `(${currentRoman})` : ''}`;
-          evidence = marker.source === 'near-boundary'
-            ? `Detected ${marker.raw} at the segment boundary`
-            : `Detected ${marker.raw} from printed text`;
+          evidence = nextImpliesFirstRoman
+            ? `Detected ${marker.raw}; inferred (i) because the next segment is ${nextMarker.raw}`
+            : (marker.source === 'near-boundary'
+              ? `Detected ${marker.raw} at the segment boundary`
+              : `Detected ${marker.raw} from printed text`);
         } else if (marker.roman) {
           currentRoman = marker.roman;
           inferred = `${fallbackLabel}${currentAlpha ? `(${currentAlpha})` : ''}(${currentRoman})`;
