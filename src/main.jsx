@@ -178,9 +178,39 @@ function App() {
   }
 
   function lineIsNearExisting(candidate, currentLines) {
-    // About 1.8% of a page vertically; close enough to treat a human line as authoritative.
-    const tolerance = 180;
+    // Small visual tolerance for ordinary duplicate checks.
+    const tolerance = 260;
     return currentLines.some((line) => line.kind === candidate.kind && Math.abs(posKey(line) - posKey(candidate)) <= tolerance);
+  }
+
+  function existingLineCoversCandidate(candidate, currentLines, detectedStarts) {
+    const sameKind = currentLines.filter((line) => line.kind === candidate.kind);
+    if (!sameKind.length) return false;
+
+    if (candidate.kind === START && Number.isInteger(candidate.questionIndex)) {
+      const index = candidate.questionIndex;
+      const here = posKey(detectedStarts[index]);
+      const prev = index > 0 ? posKey(detectedStarts[index - 1]) : -Infinity;
+      const next = index < detectedStarts.length - 1 ? posKey(detectedStarts[index + 1]) : Infinity;
+      const lower = Number.isFinite(prev) ? (prev + here) / 2 : -Infinity;
+      const upper = Number.isFinite(next) ? (here + next) / 2 : Infinity;
+      return sameKind.some((line) => {
+        const key = posKey(line);
+        return key > lower && key < upper;
+      });
+    }
+
+    if (candidate.kind === END && Number.isInteger(candidate.questionIndex)) {
+      const index = candidate.questionIndex;
+      const startKey = posKey(detectedStarts[index]);
+      const nextKey = index < detectedStarts.length - 1 ? posKey(detectedStarts[index + 1]) : Infinity;
+      return sameKind.some((line) => {
+        const key = posKey(line);
+        return key > startKey && key < nextKey;
+      });
+    }
+
+    return lineIsNearExisting(candidate, currentLines);
   }
 
   function detectMajorStarts() {
@@ -268,8 +298,8 @@ function App() {
         end = { page: pages.length, y: round4(1 - footerPct / 100 - 0.008) };
       }
 
-      candidates.push({ id: makeId(START), page: start.page, y: start.y, kind: START, label: start.label, manualLabel: false, source: 'suggested' });
-      candidates.push({ id: makeId(END), page: end.page, y: safeY(end.y), kind: END, label: '', manualLabel: false, source: 'suggested' });
+      candidates.push({ id: makeId(START), page: start.page, y: start.y, kind: START, label: start.label, manualLabel: false, source: 'suggested', questionIndex: index });
+      candidates.push({ id: makeId(END), page: end.page, y: safeY(end.y), kind: END, label: '', manualLabel: false, source: 'suggested', questionIndex: index });
 
       rawParts
         .filter((part) => within(part, start, end) && comparePos(part, start) > 100)
@@ -282,18 +312,19 @@ function App() {
             label: `${start.label}${part.raw}`,
             manualLabel: false,
             source: 'suggested',
+            questionIndex: index,
           });
         });
     });
 
     setLines((current) => {
-      const additions = candidates.filter((candidate) => !lineIsNearExisting(candidate, current));
+      const additions = candidates.filter((candidate) => !existingLineCoversCandidate(candidate, current, starts));
       setLastSuggestionIds(additions.map((line) => line.id));
       if (!additions.length) {
         setStatus('No new suggestions were added. Your existing lines already cover the detected boundaries.');
         return current;
       }
-      setStatus(`Added ${additions.length} automatic suggestions without changing any existing lines. Suggested lines are shown lighter/dashed until you move or edit them.`);
+      setStatus(`Added ${additions.length} automatic suggestions without changing any existing lines. Existing manual Start/End lines take priority for their question, so duplicate question boundaries are skipped.`);
       const merged = [...current, ...additions].sort(comparePos);
       const firstSuggestedStart = additions.find((line) => line.kind === START);
       if (firstSuggestedStart && !selectedQuestionId) setSelectedQuestionId(firstSuggestedStart.id);
