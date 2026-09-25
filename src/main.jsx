@@ -385,38 +385,64 @@ function App() {
       return { alpha: null, roman: null };
     }
 
+    function parseMarkerFromText(text) {
+      const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!cleaned) return null;
+
+      // Only trust markers close to the start of a printed row. This prevents
+      // references such as "using your answer in (b)(i)" from becoming labels.
+      const withoutQuestionNumber = cleaned.replace(/^(?:Q\s*)?\d{1,2}\s*/i, '');
+      const both = withoutQuestionNumber.match(/^\(([a-h])\)\s*\(([ivxlcdm]+)\)(?=\s|[.,;:]|$)/i);
+      if (both) return {
+        alpha: both[1].toLowerCase(), roman: both[2].toLowerCase(),
+        raw: `(${both[1].toLowerCase()})(${both[2].toLowerCase()})`, printedText: cleaned,
+      };
+      const alpha = withoutQuestionNumber.match(/^\(([a-h])\)(?=\s|[.,;:]|$)/i);
+      if (alpha) return {
+        alpha: alpha[1].toLowerCase(), roman: null,
+        raw: `(${alpha[1].toLowerCase()})`, printedText: cleaned,
+      };
+      const roman = withoutQuestionNumber.match(/^\(([ivxlcdm]+)\)(?=\s|[.,;:]|$)/i);
+      if (roman) return {
+        alpha: null, roman: roman[1].toLowerCase(),
+        raw: `(${roman[1].toLowerCase()})`, printedText: cleaned,
+      };
+      return null;
+    }
+
     function markerForSegment(start, end) {
-      // Prefer the printed part marker nearest the segment start. This remains
-      // robust when a teacher places the blue line a few pixels above or below
-      // the actual (a)/(ii) text.
-      const nearby = detectedPartStarts
-        .filter((part) => comparePos(part, end) < 0)
-        .map((part) => ({ part, delta: posKey(part) - posKey(start) }))
-        .filter(({ part, delta }) => {
-          if (part.page !== start.page) return false;
-          // Allow the printed marker to sit just above a manually placed blue line,
-          // but do not accidentally reuse a marker from the previous segment.
-          return delta >= -250 && delta <= 800;
-        })
-        .sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta))[0];
-      if (nearby) return parsePartRaw(nearby.part.raw);
-
-      // For the first segment, the printed marker can be well below START.
-      // Use the first marker actually contained in the segment.
-      const firstInside = detectedPartStarts.find((part) => comparePos(part, start) >= 0 && comparePos(part, end) < 0);
-      if (firstInside) return parsePartRaw(firstInside.raw);
-
-      // Text-row fallback for PDFs whose text extraction merged markers oddly.
+      // Primary evidence: read the actual PDF text rows *inside this segment*.
+      // Check the first rows first because printed question-part markers occur at
+      // the start of a segment. This avoids reusing the marker from a prior part.
       const rows = rowsInside(start, end);
-      for (const row of rows) {
-        const alphaRoman = row.text.match(/(?:^|\s)\(([a-h])\)\s*\(([ivxlcdm]+)\)(?=\s|$)/i);
-        if (alphaRoman) return { alpha: alphaRoman[1].toLowerCase(), roman: alphaRoman[2].toLowerCase() };
-        const alphaMatch = row.text.match(/(?:^|\s)\(([a-h])\)(?=\s|$)/i);
-        if (alphaMatch) return { alpha: alphaMatch[1].toLowerCase(), roman: null };
-        const romanMatch = row.text.match(/(?:^|\s)\(([ivxlcdm]+)\)(?=\s|$)/i);
-        if (romanMatch) return { alpha: null, roman: romanMatch[1].toLowerCase() };
+      const firstRows = rows.slice(0, 14);
+      for (const row of firstRows) {
+        const marker = parseMarkerFromText(row.text);
+        if (marker) return { ...marker, source: 'printed' };
       }
-      return { alpha: null, roman: null };
+
+      // If the teacher placed the blue boundary a few pixels below the printed
+      // marker, allow a *small* look-back on the same page only. Keep this tight
+      // so the previous segment's marker is not accidentally reused.
+      const nearby = detectedPartStarts
+        .filter((part) => part.page === start.page && comparePos(part, end) < 0)
+        .map((part) => ({ part, delta: posKey(part) - posKey(start) }))
+        .filter(({ delta }) => delta >= -120 && delta <= 220)
+        .sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta))[0];
+      if (nearby) {
+        const parsed = parsePartRaw(nearby.part.raw);
+        return { ...parsed, raw: nearby.part.raw, printedText: nearby.part.raw, source: 'near-boundary' };
+      }
+
+      // A first segment may begin at the whole-question number and only reach
+      // (a)/(i) a little later. Search the remaining rows, still using anchored
+      // printed markers rather than arbitrary references in the prose.
+      for (const row of rows.slice(14)) {
+        const marker = parseMarkerFromText(row.text);
+        if (marker) return { ...marker, source: 'printed-later' };
+      }
+
+      return { alpha: null, roman: null, raw: null, printedText: null, source: 'none' };
     }
 
     return starts.map((start, index) => {
@@ -436,23 +462,42 @@ function App() {
       const segments = boundaries.map((boundary, segmentIndex) => {
         const segmentEnd = segmentIndex < parts.length ? parts[segmentIndex] : finalEnd;
         const marker = markerForSegment(boundary, segmentEnd);
+        let evidence = 'No printed part marker found';
+        let inferred = null;
+
         if (marker.alpha) {
           currentAlpha = marker.alpha;
           currentRoman = marker.roman || null;
+          inferred = `${fallbackLabel}(${currentAlpha})${currentRoman ? `(${currentRoman})` : ''}`;
+          evidence = marker.source === 'near-boundary'
+            ? `Detected ${marker.raw} at the segment boundary`
+            : `Detected ${marker.raw} from printed text`;
         } else if (marker.roman) {
           currentRoman = marker.roman;
+          inferred = `${fallbackLabel}${currentAlpha ? `(${currentAlpha})` : ''}(${currentRoman})`;
+          evidence = currentAlpha
+            ? `Detected ${marker.raw}; inherited (${currentAlpha}) from the previous part`
+            : `Detected ${marker.raw} from printed text`;
+        } else if (!parts.length) {
+          // A question with no blue part boundaries is legitimately just Qn.
+          inferred = fallbackLabel;
+          evidence = 'Whole question; no part boundaries';
+        } else {
+          // Do not silently repeat the previous part label when extraction fails.
+          // Make uncertainty visible so the teacher only needs to fix true misses.
+          inferred = `${fallbackLabel} part ${segmentIndex + 1}`;
         }
-        let inferred = fallbackLabel;
-        if (currentAlpha) inferred += `(${currentAlpha})`;
-        if (currentRoman) inferred += `(${currentRoman})`;
+
         const override = segmentLabelOverrides[boundary.id];
         const isPart = segmentPartFlags[boundary.id] !== false;
         return {
           id: boundary.id,
           start: boundary,
           end: segmentEnd,
-          label: override || inferred || `${fallbackLabel} part ${segmentIndex + 1}`,
+          label: override || inferred,
           autoLabel: inferred,
+          labelEvidence: evidence,
+          detectedMarker: marker.raw,
           labelEditedByUser: Boolean(override),
           isPart,
         };
@@ -485,6 +530,8 @@ function App() {
         segments: region.segments.map((segment) => ({
           label: segment.label,
           labelEditedByUser: Boolean(segment.labelEditedByUser),
+          labelEvidence: segment.labelEvidence || null,
+          detectedMarker: segment.detectedMarker || null,
           isPart: segment.isPart !== false,
           start: { page: segment.start.page, yFractionFromTop: round4(segment.start.y) },
           end: { page: segment.end.page, yFractionFromTop: round4(segment.end.y) },
@@ -595,7 +642,7 @@ function App() {
                     <div className="segment-label-list">
                       {selectedRegion.segments.map((segment) => (
                         <button key={segment.id} type="button" className={`segment-label-row ${selectedSegmentId === segment.id ? 'selected' : ''} ${segment.isPart === false ? 'not-part' : ''}`} onClick={() => setSelectedSegmentId(segment.id)}>
-                          <span>{segment.isPart === false ? 'Not a part' : segment.label}</span><small>{segment.isPart === false ? 'excluded' : (segment.labelEditedByUser ? 'edited' : 'auto')}</small>
+                          <span>{segment.isPart === false ? 'Not a part' : segment.label}</span><small>{segment.isPart === false ? 'excluded' : (segment.labelEditedByUser ? 'edited' : (segment.detectedMarker ? 'detected' : 'check'))}</small>
                         </button>
                       ))}
                     </div>
@@ -604,6 +651,11 @@ function App() {
                         <label>Selected segment
                           <input value={segment.label} disabled={segment.isPart === false} onChange={(e) => setSegmentLabelOverrides((current) => ({ ...current, [segment.id]: e.target.value }))} />
                         </label>
+                        {segment.isPart !== false && (
+                          <p className={`label-evidence ${segment.detectedMarker ? 'detected' : 'uncertain'}`}>
+                            {segment.labelEditedByUser ? 'Manual label' : segment.labelEvidence}
+                          </p>
+                        )}
                         <label className="check-row segment-part-toggle">
                           <input type="checkbox" checked={segment.isPart !== false} onChange={(e) => setSegmentPartFlags((current) => ({ ...current, [segment.id]: e.target.checked }))} />
                           Treat this region as a question part

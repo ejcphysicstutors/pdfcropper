@@ -161,3 +161,7 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
 .segment-overlay.not-part { border-left-color: rgba(100,116,139,.26); background: rgba(100,116,139,.035); }
 .segment-overlay.not-part .segment-watermark { background: rgba(100,116,139,.10); color: rgba(71,85,105,.40); font-size: 1.15rem; letter-spacing: .01em; }
 .segment-overlay.not-part.selected { background: rgba(100,116,139,.075); border-left-color: rgba(100,116,139,.55); }
+
+.label-evidence { margin: -4px 0 10px; padding: 7px 9px; border-radius: 8px; font-size: .72rem; line-height: 1.35; font-weight: 700; }
+.label-evidence.detected { background: #eef8f3; color: #2f6a4e; border: 1px solid #cfe8da; }
+.label-evidence.uncertain { background: #fff7e8; color: #8a5a16; border: 1px solid #f1ddb6; }
