@@ -62,6 +62,49 @@ function extractTextRows(pageData) {
     .sort((a, b) => a.yNorm - b.yNorm);
 }
 
+
+function normalizePrintedMarkerText(text) {
+  return String(text || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[（]/g, '(')
+    .replace(/[）]/g, ')')
+    .replace(/\(\s+/g, '(')
+    .replace(/\s+\)/g, ')')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseLeadingPartMarker(text) {
+  const cleaned = normalizePrintedMarkerText(text);
+  if (!cleaned) return null;
+
+  // A PDF may split a printed marker into separate text items, producing forms
+  // such as "( ii )", "ii)" or "1 (a) (i)" after row reconstruction.
+  // Strip only a leading whole-question number, then inspect the beginning.
+  const candidate = cleaned.replace(/^(?:Q\s*)?\d{1,2}\s*[.)]?\s*/i, '');
+
+  const both = candidate.match(/^(?:\(([a-h])\)|([a-h])\))\s*(?:\(([ivxlcdm]+)\)|([ivxlcdm]+)\))(?=\s|[.,;:]|$)/i);
+  if (both) {
+    const alpha = (both[1] || both[2]).toLowerCase();
+    const roman = (both[3] || both[4]).toLowerCase();
+    return { alpha, roman, raw: `(${alpha})(${roman})`, printedText: cleaned };
+  }
+
+  const alpha = candidate.match(/^(?:\(([a-h])\)|([a-h])\))(?=\s|[.,;:]|$)/i);
+  if (alpha) {
+    const value = (alpha[1] || alpha[2]).toLowerCase();
+    return { alpha: value, roman: null, raw: `(${value})`, printedText: cleaned };
+  }
+
+  const roman = candidate.match(/^(?:\(([ivxlcdm]+)\)|([ivxlcdm]+)\))(?=\s|[.,;:]|$)/i);
+  if (roman) {
+    const value = (roman[1] || roman[2]).toLowerCase();
+    return { alpha: null, roman: value, raw: `(${value})`, printedText: cleaned };
+  }
+
+  return null;
+}
+
 function App() {
   const [file, setFile] = useState(null);
   const [pdf, setPdf] = useState(null);
@@ -273,15 +316,14 @@ function App() {
       const bottom = 1 - footerPct / 100;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom || row.xNorm > 0.30) continue;
-        const alphaRoman = row.text.match(/^(?:\d{1,2}\s+)?\(([a-h])\)\s*\(([ivxlcdm]+)\)(?=\s|$)/i);
-        const alpha = row.text.match(/^(?:\d{1,2}\s+)?\(([a-h])\)(?=\s|$)/i);
-        const roman = row.text.match(/^\(([ivxlcdm]+)\)(?=\s|$)/i);
-        let raw = null;
-        if (alphaRoman) raw = `(${alphaRoman[1].toLowerCase()})(${alphaRoman[2].toLowerCase()})`;
-        else if (alpha) raw = `(${alpha[1].toLowerCase()})`;
-        else if (roman) raw = `(${roman[1].toLowerCase()})`;
-        if (!raw) continue;
-        parts.push({ page: pageData.pageNumber, y: round4(Math.max(top + 0.004, row.yNorm - 0.009)), raw });
+        const marker = parseLeadingPartMarker(row.text);
+        if (!marker) continue;
+        parts.push({
+          page: pageData.pageNumber,
+          y: round4(Math.max(top + 0.004, row.yNorm - 0.009)),
+          raw: marker.raw,
+          printedText: marker.printedText,
+        });
       }
     }
     return parts.sort(comparePos).filter((candidate, idx, arr) => idx === 0 || Math.abs(posKey(candidate) - posKey(arr[idx - 1])) > 150);
@@ -386,58 +428,60 @@ function App() {
     }
 
     function parseMarkerFromText(text) {
-      const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
-      if (!cleaned) return null;
-
-      // Only trust markers close to the start of a printed row. This prevents
-      // references such as "using your answer in (b)(i)" from becoming labels.
-      const withoutQuestionNumber = cleaned.replace(/^(?:Q\s*)?\d{1,2}\s*/i, '');
-      const both = withoutQuestionNumber.match(/^\(([a-h])\)\s*\(([ivxlcdm]+)\)(?=\s|[.,;:]|$)/i);
-      if (both) return {
-        alpha: both[1].toLowerCase(), roman: both[2].toLowerCase(),
-        raw: `(${both[1].toLowerCase()})(${both[2].toLowerCase()})`, printedText: cleaned,
-      };
-      const alpha = withoutQuestionNumber.match(/^\(([a-h])\)(?=\s|[.,;:]|$)/i);
-      if (alpha) return {
-        alpha: alpha[1].toLowerCase(), roman: null,
-        raw: `(${alpha[1].toLowerCase()})`, printedText: cleaned,
-      };
-      const roman = withoutQuestionNumber.match(/^\(([ivxlcdm]+)\)(?=\s|[.,;:]|$)/i);
-      if (roman) return {
-        alpha: null, roman: roman[1].toLowerCase(),
-        raw: `(${roman[1].toLowerCase()})`, printedText: cleaned,
-      };
-      return null;
+      return parseLeadingPartMarker(text);
     }
 
     function markerForSegment(start, end) {
-      // Primary evidence: read the actual PDF text rows *inside this segment*.
-      // Check the first rows first because printed question-part markers occur at
-      // the start of a segment. This avoids reusing the marker from a prior part.
+      // 1) Read the actual PDF text inside this segment. Printed part markers
+      // should normally occur in the first few rows.
       const rows = rowsInside(start, end);
-      const firstRows = rows.slice(0, 14);
-      for (const row of firstRows) {
+      for (const row of rows.slice(0, 18)) {
         const marker = parseMarkerFromText(row.text);
         if (marker) return { ...marker, source: 'printed' };
       }
 
-      // If the teacher placed the blue boundary a few pixels below the printed
-      // marker, allow a *small* look-back on the same page only. Keep this tight
-      // so the previous segment's marker is not accidentally reused.
+      // 2) Blue boundaries are placed visually, while PDF text coordinates use
+      // baselines. The printed marker may therefore sit a little above or below
+      // the exact boundary. Search a narrow top-left neighbourhood around the
+      // segment start and choose the nearest valid printed marker.
+      const pageData = pages.find((item) => item.pageNumber === start.page);
+      if (pageData) {
+        const nearbyRows = (pageData.rows || [])
+          .filter((row) => row.xNorm <= 0.36)
+          .map((row) => ({ row, delta: row.yNorm - start.y }))
+          .filter(({ delta }) => delta >= -0.03 && delta <= 0.075)
+          .sort((a, b) => {
+            const aPenalty = a.delta < 0 ? Math.abs(a.delta) * 1.4 : Math.abs(a.delta);
+            const bPenalty = b.delta < 0 ? Math.abs(b.delta) * 1.4 : Math.abs(b.delta);
+            return aPenalty - bPenalty;
+          });
+        for (const { row } of nearbyRows) {
+          const marker = parseMarkerFromText(row.text);
+          if (marker) return { ...marker, source: 'near-boundary' };
+        }
+      }
+
+      // 3) Fall back to the part-start detector, which now uses the same robust
+      // parser and tolerates PDF.js inserting spaces inside parentheses.
       const nearby = detectedPartStarts
         .filter((part) => part.page === start.page && comparePos(part, end) < 0)
         .map((part) => ({ part, delta: posKey(part) - posKey(start) }))
-        .filter(({ delta }) => delta >= -120 && delta <= 220)
+        .filter(({ delta }) => delta >= -320 && delta <= 760)
         .sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta))[0];
       if (nearby) {
         const parsed = parsePartRaw(nearby.part.raw);
-        return { ...parsed, raw: nearby.part.raw, printedText: nearby.part.raw, source: 'near-boundary' };
+        return {
+          ...parsed,
+          raw: nearby.part.raw,
+          printedText: nearby.part.printedText || nearby.part.raw,
+          source: 'near-boundary',
+        };
       }
 
-      // A first segment may begin at the whole-question number and only reach
-      // (a)/(i) a little later. Search the remaining rows, still using anchored
-      // printed markers rather than arbitrary references in the prose.
-      for (const row of rows.slice(14)) {
+      // 4) A first segment can contain the whole-question number before its first
+      // (a)/(i). Search the rest of the segment only as a final printed-text
+      // fallback.
+      for (const row of rows.slice(18)) {
         const marker = parseMarkerFromText(row.text);
         if (marker) return { ...marker, source: 'printed-later' };
       }
