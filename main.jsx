@@ -43,6 +43,7 @@ function App() {
   const [footerPct, setFooterPct] = useState(6);
   const [lines, setLines] = useState([]);
   const [lineMode, setLineMode] = useState(START);
+  const [heldLineMode, setHeldLineMode] = useState(null);
   const [status, setStatus] = useState('Choose a PDF to begin.');
   const [loading, setLoading] = useState(false);
   const [showGuides, setShowGuides] = useState(true);
@@ -57,30 +58,48 @@ function App() {
   }, [pdf]);
 
   useEffect(() => {
-    function handleShortcut(event) {
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
-      const target = event.target;
-      const tag = target?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
+    function keyToMode(key) {
+      const lower = key.toLowerCase();
+      if (lower === 's') return START;
+      if (lower === 'e') return END;
+      if (lower === 'p') return PART;
+      return null;
+    }
 
-      const key = event.key.toLowerCase();
-      if (key === 's') {
-        setLineMode(START);
-        setStatus('START mode selected. Click the rolling paper to place a question start line.');
-      } else if (key === 'e') {
-        setLineMode(END);
-        setStatus('END mode selected. Click the rolling paper to place a question end line.');
-      } else if (key === 'p') {
-        setLineMode(PART);
-        setStatus('PART mode selected. Click the rolling paper to place a blue part line.');
-      } else {
-        return;
-      }
+    function isTypingTarget(target) {
+      const tag = target?.tagName?.toLowerCase();
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable;
+    }
+
+    function handleShortcutDown(event) {
+      if (event.ctrlKey || event.metaKey || event.altKey || isTypingTarget(event.target)) return;
+      const mode = keyToMode(event.key);
+      if (!mode) return;
+
+      setHeldLineMode(mode);
+      setLineMode(mode);
+      const label = mode === START ? 'START' : mode === END ? 'END' : 'PART';
+      setStatus(`${label} mode selected. Click the rolling paper to place the line.`);
       event.preventDefault();
     }
 
-    window.addEventListener('keydown', handleShortcut);
-    return () => window.removeEventListener('keydown', handleShortcut);
+    function handleShortcutUp(event) {
+      const mode = keyToMode(event.key);
+      if (mode) setHeldLineMode(null);
+    }
+
+    function clearHeldMode() {
+      setHeldLineMode(null);
+    }
+
+    window.addEventListener('keydown', handleShortcutDown);
+    window.addEventListener('keyup', handleShortcutUp);
+    window.addEventListener('blur', clearHeldMode);
+    return () => {
+      window.removeEventListener('keydown', handleShortcutDown);
+      window.removeEventListener('keyup', handleShortcutUp);
+      window.removeEventListener('blur', clearHeldMode);
+    };
   }, []);
 
   async function openPdf(selected) {
@@ -380,11 +399,12 @@ function App() {
           <section>
             <h2>2. Region lines</h2>
             <div className="line-mode-picker" role="group" aria-label="Line type">
-              <button className={`line-mode start-mode ${lineMode === START ? 'active' : ''}`} onClick={() => setLineMode(START)}><span className="mode-swatch start-swatch" />Question start <kbd>S</kbd></button>
-              <button className={`line-mode end-mode ${lineMode === END ? 'active' : ''}`} onClick={() => setLineMode(END)}><span className="mode-swatch end-swatch" />Question end <kbd>E</kbd></button>
-              <button className={`line-mode part-mode ${lineMode === PART ? 'active' : ''}`} onClick={() => setLineMode(PART)}><span className="mode-swatch part-swatch" />Part <kbd>P</kbd></button>
+              <button className={`line-mode start-mode ${(heldLineMode || lineMode) === START ? 'active' : ''}`} onClick={() => setLineMode(START)}><span className="mode-swatch start-swatch" />Question start <kbd>S</kbd></button>
+              <button className={`line-mode end-mode ${(heldLineMode || lineMode) === END ? 'active' : ''}`} onClick={() => setLineMode(END)}><span className="mode-swatch end-swatch" />Question end <kbd>E</kbd></button>
+              <button className={`line-mode part-mode ${(heldLineMode || lineMode) === PART ? 'active' : ''}`} onClick={() => setLineMode(PART)}><span className="mode-swatch part-swatch" />Part <kbd>P</kbd></button>
             </div>
-            <p className="small">Use <strong>S</strong>, <strong>E</strong> or <strong>P</strong> to switch line type, then click the rolling paper. Drag to move; double-click to remove. Suggestions only add missing lines and never replace your manual work.</p>
+            <div className="shortcut-strip"><span><kbd>S</kbd> Start</span><span><kbd>E</kbd> End</span><span><kbd>P</kbd> Part</span></div>
+            <p className="small">Press <strong>S</strong>, <strong>E</strong> or <strong>P</strong> at any time, then click the rolling paper. You can also hold the key while clicking. Drag to move; double-click to remove. Suggestions only add missing lines and never replace your manual work.</p>
             <div className="button-stack">
               <button className="secondary" onClick={suggestRegions} disabled={!pages.length || loading}>Suggest regions</button>
               <button className="ghost" onClick={undoLastSuggestions} disabled={!lastSuggestionIds.length}>Undo suggestions</button>
@@ -441,7 +461,7 @@ function App() {
                 <div className="rolling-paper">
                   {pages.map((pageData) => (
                     <PdfPage key={pageData.pageNumber} pageData={pageData} headerPct={headerPct} footerPct={footerPct}
-                      lines={lines.filter((line) => line.page === pageData.pageNumber)} lineMode={lineMode} onAddLine={addLine}
+                      lines={lines.filter((line) => line.page === pageData.pageNumber)} lineMode={heldLineMode || lineMode} onAddLine={addLine}
                       onMoveLine={moveLine} onRemoveLine={removeLine} showGuides={showGuides} regions={regions} />
                   ))}
                 </div>
