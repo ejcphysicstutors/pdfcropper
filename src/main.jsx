@@ -33,8 +33,18 @@ function within(pos, start, end) {
 function textItemPosition(item, viewport) {
   const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
   const x = transform[4];
-  const yFromTop = viewport.height - transform[5];
-  return { xNorm: x / viewport.width, yNorm: yFromTop / viewport.height };
+
+  // viewport.transform already converts PDF bottom-left coordinates into the
+  // browser's top-left coordinate system (its Y scale is negative).
+  // transform[5] is therefore already a distance from the TOP of the rendered
+  // page. Subtracting it from viewport.height flips the text vertically a
+  // second time and makes printed markers appear on the wrong side of the page.
+  const yFromTop = transform[5];
+
+  return {
+    xNorm: clamp(x / viewport.width, 0, 1),
+    yNorm: clamp(yFromTop / viewport.height, 0, 1),
+  };
 }
 
 function extractTextRows(pageData) {
