@@ -47,6 +47,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [showGuides, setShowGuides] = useState(true);
   const [selectedQuestionId, setSelectedQuestionId] = useState(null);
+  const [lastSuggestionIds, setLastSuggestionIds] = useState([]);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -88,6 +89,7 @@ function App() {
     setStatus('Loading PDF…');
     setFile(selected);
     setLines([]);
+    setLastSuggestionIds([]);
     setSelectedQuestionId(null);
 
     try {
@@ -123,25 +125,43 @@ function App() {
   }
 
   function addLine(page, y, kind = lineMode) {
-    const newLine = { id: makeId(kind), page, y: safeY(y), kind, label: '', manualLabel: false };
+    const newLine = { id: makeId(kind), page, y: safeY(y), kind, label: '', manualLabel: false, source: 'manual' };
     setLines((current) => [...current, newLine].sort(comparePos));
   }
 
   function moveLine(id, page, y) {
-    setLines((current) => current.map((line) => line.id === id ? { ...line, page, y: safeY(y) } : line).sort(comparePos));
+    setLines((current) => current.map((line) => line.id === id ? { ...line, page, y: safeY(y), source: 'manual' } : line).sort(comparePos));
+    setLastSuggestionIds((ids) => ids.filter((item) => item !== id));
   }
 
   function removeLine(id) {
     setLines((current) => current.filter((line) => line.id !== id));
+    setLastSuggestionIds((ids) => ids.filter((item) => item !== id));
   }
 
   function updateLineLabel(id, label) {
-    setLines((current) => current.map((line) => line.id === id ? { ...line, label, manualLabel: true } : line));
+    setLines((current) => current.map((line) => line.id === id ? { ...line, label, manualLabel: true, source: 'manual' } : line));
+    setLastSuggestionIds((ids) => ids.filter((item) => item !== id));
   }
 
   function clearLines() {
     setLines([]);
+    setLastSuggestionIds([]);
     setSelectedQuestionId(null);
+  }
+
+  function undoLastSuggestions() {
+    if (!lastSuggestionIds.length) return;
+    const ids = new Set(lastSuggestionIds);
+    setLines((current) => current.filter((line) => !ids.has(line.id)));
+    setLastSuggestionIds([]);
+    setStatus('Removed the latest automatic suggestions. Your manual lines were kept.');
+  }
+
+  function lineIsNearExisting(candidate, currentLines) {
+    // About 1.8% of a page vertically; close enough to treat a human line as authoritative.
+    const tolerance = 180;
+    return currentLines.some((line) => line.kind === candidate.kind && Math.abs(posKey(line) - posKey(candidate)) <= tolerance);
   }
 
   function detectMajorStarts() {
@@ -204,13 +224,13 @@ function App() {
   function suggestRegions() {
     const starts = detectMajorStarts();
     if (!starts.length) {
-      setStatus('No reliable whole-question starts were found. Add red START/END lines manually; blue part lines can still be added anywhere inside a question.');
+      setStatus('No reliable whole-question starts were found. Your existing lines were left untouched. Add red START/END lines manually; blue part lines can still be added anywhere inside a question.');
       return;
     }
 
     const totals = detectTotalMarks();
     const rawParts = detectPartStarts();
-    const suggested = [];
+    const candidates = [];
 
     starts.forEach((start, index) => {
       const nextStart = starts[index + 1] || null;
@@ -229,27 +249,37 @@ function App() {
         end = { page: pages.length, y: round4(1 - footerPct / 100 - 0.008) };
       }
 
-      const startLine = { id: makeId(START), page: start.page, y: start.y, kind: START, label: start.label, manualLabel: false };
-      const endLine = { id: makeId(END), page: end.page, y: safeY(end.y), kind: END, label: '', manualLabel: false };
-      suggested.push(startLine, endLine);
+      candidates.push({ id: makeId(START), page: start.page, y: start.y, kind: START, label: start.label, manualLabel: false, source: 'suggested' });
+      candidates.push({ id: makeId(END), page: end.page, y: safeY(end.y), kind: END, label: '', manualLabel: false, source: 'suggested' });
 
       rawParts
         .filter((part) => within(part, start, end) && comparePos(part, start) > 100)
         .forEach((part) => {
-          suggested.push({
+          candidates.push({
             id: makeId(PART),
             page: part.page,
             y: part.y,
             kind: PART,
             label: `${start.label}${part.raw}`,
             manualLabel: false,
+            source: 'suggested',
           });
         });
     });
 
-    setLines(suggested.sort(comparePos));
-    setSelectedQuestionId(suggested.find((line) => line.kind === START)?.id || null);
-    setStatus(`Suggested ${starts.length} question regions, including start/end boundaries and detected lettered parts. Scan and adjust any lines that are wrong.`);
+    setLines((current) => {
+      const additions = candidates.filter((candidate) => !lineIsNearExisting(candidate, current));
+      setLastSuggestionIds(additions.map((line) => line.id));
+      if (!additions.length) {
+        setStatus('No new suggestions were added. Your existing lines already cover the detected boundaries.');
+        return current;
+      }
+      setStatus(`Added ${additions.length} automatic suggestions without changing any existing lines. Suggested lines are shown lighter/dashed until you move or edit them.`);
+      const merged = [...current, ...additions].sort(comparePos);
+      const firstSuggestedStart = additions.find((line) => line.kind === START);
+      if (firstSuggestedStart && !selectedQuestionId) setSelectedQuestionId(firstSuggestedStart.id);
+      return merged;
+    });
   }
 
   const regions = useMemo(() => {
@@ -302,6 +332,7 @@ function App() {
         type: line.kind,
         label: line.label || null,
         labelEditedByUser: Boolean(line.manualLabel),
+        source: line.source || 'manual',
       })),
       notes: 'question-start/question-end define explicit crop regions. part lines are nested segment starts. Positions are fractions of original PDF page height from the top edge.',
     };
@@ -353,10 +384,11 @@ function App() {
               <button className={`line-mode end-mode ${lineMode === END ? 'active' : ''}`} onClick={() => setLineMode(END)}><span className="mode-swatch end-swatch" />Question end <kbd>E</kbd></button>
               <button className={`line-mode part-mode ${lineMode === PART ? 'active' : ''}`} onClick={() => setLineMode(PART)}><span className="mode-swatch part-swatch" />Part <kbd>P</kbd></button>
             </div>
-            <p className="small">Use <strong>S</strong>, <strong>E</strong> or <strong>P</strong> to switch line type, then click the rolling paper. Drag to move; double-click to remove.</p>
+            <p className="small">Use <strong>S</strong>, <strong>E</strong> or <strong>P</strong> to switch line type, then click the rolling paper. Drag to move; double-click to remove. Suggestions only add missing lines and never replace your manual work.</p>
             <div className="button-stack">
               <button className="secondary" onClick={suggestRegions} disabled={!pages.length || loading}>Suggest regions</button>
-              <button className="ghost" onClick={clearLines} disabled={!lines.length}>Clear</button>
+              <button className="ghost" onClick={undoLastSuggestions} disabled={!lastSuggestionIds.length}>Undo suggestions</button>
+              <button className="ghost clear-button" onClick={clearLines} disabled={!lines.length}>Clear all</button>
             </div>
             <div className="metric-stack">
               <div className="metric"><span><i className="metric-dot start-dot" />Starts</span><strong>{counts.start}</strong></div>
@@ -498,7 +530,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
         {lines.map((line) => {
           const yVisible = ((line.y - visibleTop) / visibleHeight) * 100;
           return (
-            <div key={line.id} className={`crop-line ${line.kind}`} style={{ top: `${yVisible}%` }} onPointerDown={(e) => beginDrag(e, line.id)} onDoubleClick={(e) => { e.stopPropagation(); onRemoveLine(line.id); }} title="Drag to move. Double-click to remove.">
+            <div key={line.id} className={`crop-line ${line.kind} ${line.source === 'suggested' ? 'suggested-line' : 'confirmed-line'}`} style={{ top: `${yVisible}%` }} onPointerDown={(e) => beginDrag(e, line.id)} onDoubleClick={(e) => { e.stopPropagation(); onRemoveLine(line.id); }} title="Drag to move. Double-click to remove.">
               <span className="line-tag">{displayText(line)}</span>
             </div>
           );
