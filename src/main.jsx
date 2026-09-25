@@ -79,6 +79,8 @@ function App() {
   const [lastSuggestionIds, setLastSuggestionIds] = useState([]);
   const [viewMode, setViewMode] = useState('segment');
   const [outputBreaks, setOutputBreaks] = useState({});
+  const [exclusions, setExclusions] = useState({});
+  const [trimOverrides, setTrimOverrides] = useState({});
   const fileInputRef = useRef(null);
 
   useEffect(() => () => { if (pdf) pdf.destroy(); }, [pdf]);
@@ -144,6 +146,8 @@ function App() {
     setSelectedQuestionId(null);
     setSelectedLineId(null);
     setOutputBreaks({});
+    setExclusions({});
+    setTrimOverrides({});
     setViewMode('segment');
 
     try {
@@ -197,7 +201,7 @@ function App() {
   }
 
   function clearLines() {
-    setLines([]); setLastSuggestionIds([]); setSelectedQuestionId(null); setSelectedLineId(null); setOutputBreaks({});
+    setLines([]); setLastSuggestionIds([]); setSelectedQuestionId(null); setSelectedLineId(null); setOutputBreaks({}); setExclusions({}); setTrimOverrides({});
   }
 
   function undoLastSuggestions() {
@@ -383,6 +387,8 @@ function App() {
           start: { page: part.page, yFractionFromTop: round4(part.y) },
         })),
         outputPageBreakFractions: (outputBreaks[region.id] || []).map(round4),
+        excludedOutputRanges: (exclusions[region.id] || []).map((range) => ({ startFraction: round4(range.start), endFraction: round4(range.end) })),
+        pageTrimOverrides: Object.entries(trimOverrides[region.id] || {}).map(([page, trim]) => ({ page: Number(page), extraTopFraction: round4(trim.topExtra || 0), extraBottomFraction: round4(trim.bottomExtra || 0) })),
       })),
       lines: [...lines].sort(comparePos).map((line) => ({
         page: line.page,
@@ -392,7 +398,7 @@ function App() {
         labelEditedByUser: Boolean(line.manualLabel),
         source: line.source || 'manual',
       })),
-      notes: 'Question starts/ends define source ownership. Header/footer removal is applied before question assembly. outputPageBreakFractions describe publication-only page breaks within each cleaned question strip and do not alter source boundaries.',
+      notes: 'Question starts/ends define source ownership. Review-only trim overrides, excluded output ranges and publication page breaks alter layout only; they do not change source question ownership.',
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -540,7 +546,11 @@ function App() {
           {!!pages.length && !loading && viewMode === 'preview' && (
             <PreviewWorkspace pages={pages} region={selectedRegion} headerPct={headerPct} footerPct={footerPct}
               savedBreaks={selectedRegion ? outputBreaks[selectedRegion.id] : []}
-              onBreaksChange={(breaks) => selectedRegion && setOutputBreaks((current) => ({ ...current, [selectedRegion.id]: breaks }))} />
+              savedExclusions={selectedRegion ? exclusions[selectedRegion.id] || [] : []}
+              trimOverrides={selectedRegion ? trimOverrides[selectedRegion.id] || {} : {}}
+              onBreaksChange={(breaks) => selectedRegion && setOutputBreaks((current) => ({ ...current, [selectedRegion.id]: breaks }))}
+              onExclusionsChange={(ranges) => selectedRegion && setExclusions((current) => ({ ...current, [selectedRegion.id]: ranges }))}
+              onTrimOverridesChange={(next) => selectedRegion && setTrimOverrides((current) => ({ ...current, [selectedRegion.id]: next }))} />
           )}
         </section>
       </main>
@@ -630,7 +640,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
   );
 }
 
-async function buildQuestionStrip(pages, region, headerPct, footerPct) {
+async function buildQuestionStrip(pages, region, headerPct, footerPct, trimOverrides = {}) {
   const relevant = pages.filter((p) => p.pageNumber >= region.start.page && p.pageNumber <= region.end.page);
   const fragments = [];
   const pageMaps = [];
@@ -643,8 +653,9 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct) {
     canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
     await pageData.page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
 
-    let top = headerPct / 100;
-    let bottom = 1 - footerPct / 100;
+    const trim = trimOverrides[pageData.pageNumber] || {};
+    let top = headerPct / 100 + (trim.topExtra || 0);
+    let bottom = 1 - footerPct / 100 - (trim.bottomExtra || 0);
     if (pageData.pageNumber === region.start.page) top = Math.max(top, region.start.y);
     if (pageData.pageNumber === region.end.page) bottom = Math.min(bottom, region.end.y);
     if (bottom <= top) continue;
@@ -720,46 +731,160 @@ function makeFinalPages(strip, breaks) {
   return pages;
 }
 
-function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, onBreaksChange }) {
+
+function normalizeExclusions(ranges) {
+  const sorted = (ranges || []).map((range) => ({
+    id: range.id || makeId('exclude'),
+    start: clamp(Math.min(range.start, range.end), 0, 1),
+    end: clamp(Math.max(range.start, range.end), 0, 1),
+  })).filter((range) => range.end - range.start > 0.002).sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && range.start <= last.end + 0.002) last.end = Math.max(last.end, range.end);
+    else merged.push({ ...range });
+  }
+  return merged;
+}
+
+function buildCompactedStrip(strip, exclusions) {
+  const normalized = normalizeExclusions(exclusions);
+  const totalRemoved = normalized.reduce((sum, range) => sum + (range.end - range.start), 0);
+  const keptFraction = Math.max(0.001, 1 - totalRemoved);
+  const out = document.createElement('canvas');
+  out.width = strip.width;
+  out.height = Math.max(1, Math.round(strip.height * keptFraction));
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, out.width, out.height);
+
+  let sourceCursor = 0;
+  let destY = 0;
+  for (const range of normalized) {
+    const startY = Math.round(range.start * strip.height);
+    if (startY > sourceCursor) {
+      const h = startY - sourceCursor;
+      ctx.drawImage(strip, 0, sourceCursor, strip.width, h, 0, destY, strip.width, h);
+      destY += h;
+    }
+    sourceCursor = Math.max(sourceCursor, Math.round(range.end * strip.height));
+  }
+  if (sourceCursor < strip.height) {
+    const h = strip.height - sourceCursor;
+    ctx.drawImage(strip, 0, sourceCursor, strip.width, h, 0, destY, strip.width, h);
+  }
+
+  function originalToCompacted(fraction) {
+    let removedBefore = 0;
+    for (const range of normalized) {
+      if (fraction >= range.end) removedBefore += range.end - range.start;
+      else if (fraction > range.start) removedBefore += fraction - range.start;
+    }
+    return clamp((fraction - removedBefore) / keptFraction, 0, 1);
+  }
+
+  function compactedToOriginal(fraction) {
+    const targetKept = clamp(fraction, 0, 1) * keptFraction;
+    let keptSeen = 0;
+    let cursor = 0;
+    for (const range of normalized) {
+      const keptSpan = range.start - cursor;
+      if (targetKept <= keptSeen + keptSpan) return clamp(cursor + (targetKept - keptSeen), 0, 1);
+      keptSeen += keptSpan;
+      cursor = range.end;
+    }
+    return clamp(cursor + (targetKept - keptSeen), 0, 1);
+  }
+
+  return { canvas: out, exclusions: normalized, originalToCompacted, compactedToOriginal };
+}
+
+function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, trimOverrides, onTrimOverridesChange }) {
   const [strip, setStrip] = useState(null);
   const [loading, setLoading] = useState(false);
   const [autoBreaks, setAutoBreaks] = useState([]);
+  const [excludeMode, setExcludeMode] = useState(false);
+
+  useEffect(() => {
+    function onKeyDown(event) {
+      const tag = event.target?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || event.target?.isContentEditable) return;
+      if (event.key.toLowerCase() === 'x') {
+        setExcludeMode((value) => !value);
+        event.preventDefault();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     if (!region) { setStrip(null); return undefined; }
     setLoading(true);
-    buildQuestionStrip(pages, region, headerPct, footerPct).then((result) => {
+    buildQuestionStrip(pages, region, headerPct, footerPct, trimOverrides).then((result) => {
       if (cancelled) return;
       setStrip(result);
-      const nextAuto = result ? automaticBreaks(result.width, result.height, result.partFractions) : [];
+      if (!result) { setLoading(false); return; }
+      const compacted = buildCompactedStrip(result.canvas, savedExclusions);
+      const compactedParts = result.partFractions
+        .filter((part) => !compacted.exclusions.some((range) => part.fraction > range.start && part.fraction < range.end))
+        .map((part) => ({ ...part, fraction: compacted.originalToCompacted(part.fraction) }));
+      const compactedAuto = automaticBreaks(compacted.canvas.width, compacted.canvas.height, compactedParts);
+      const nextAuto = compactedAuto.map(compacted.compactedToOriginal);
       setAutoBreaks(nextAuto);
-      if ((!savedBreaks || !savedBreaks.length) && nextAuto.length) onBreaksChange(nextAuto);
-      if ((!savedBreaks || !savedBreaks.length) && !nextAuto.length) onBreaksChange([]);
+      if ((!savedBreaks || !savedBreaks.length)) onBreaksChange(nextAuto);
       setLoading(false);
     }).catch((error) => { console.error(error); if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [pages, region?.id, region?.start.page, region?.start.y, region?.end.page, region?.end.y, headerPct, footerPct]);
+  }, [pages, region?.id, region?.start.page, region?.start.y, region?.end.page, region?.end.y, headerPct, footerPct, JSON.stringify(trimOverrides)]);
 
   if (!region) return <div className="preview-empty large">Select a question to review.</div>;
   if (loading || !strip) return <div className="loading-card">Building cleaned question preview…</div>;
 
-  const breaks = savedBreaks || [];
-  const finalPages = makeFinalPages(strip.canvas, breaks);
+  const compacted = buildCompactedStrip(strip.canvas, savedExclusions);
+  const compactedBreaks = (savedBreaks || [])
+    .filter((fraction) => !compacted.exclusions.some((range) => fraction > range.start && fraction < range.end))
+    .map(compacted.originalToCompacted);
+  const finalPages = makeFinalPages(compacted.canvas, compactedBreaks);
+  const sourcePages = [];
+  for (let page = region.start.page; page <= region.end.page; page += 1) sourcePages.push(page);
+
+  function updateTrim(page, field, valuePct) {
+    const value = clamp(Number(valuePct) / 100, 0, 0.12);
+    onTrimOverridesChange({ ...trimOverrides, [page]: { ...(trimOverrides[page] || {}), [field]: value } });
+  }
 
   return (
     <div className="preview-review-workspace">
       <div className="preview-toolbar">
-        <div><p className="eyebrow">Review output</p><h2>{region.label}</h2><p>Headers and footers are removed before these fragments are joined. Purple lines are publication-only page breaks.</p></div>
-        <button className="ghost" onClick={() => onBreaksChange(autoBreaks)}>Reset page breaks</button>
+        <div><p className="eyebrow">Review output</p><h2>{region.label}</h2><p>Use <strong>X</strong> or “Exclude gap” to remove unwanted answer space. Local page trims remove stubborn headers/footers without changing the whole paper.</p></div>
+        <div className="preview-actions">
+          <button className={`ghost ${excludeMode ? 'active-tool' : ''}`} onClick={() => setExcludeMode((value) => !value)}>Exclude gap <kbd>X</kbd></button>
+          <button className="ghost" onClick={() => onBreaksChange(autoBreaks)}>Reset page breaks</button>
+        </div>
       </div>
+
+      <div className="review-trim-card">
+        <div><strong>Local source-page trim</strong><span>Use only when a header/footer survives the global cleanup.</span></div>
+        <div className="trim-page-grid">
+          {sourcePages.map((page) => {
+            const trim = trimOverrides[page] || {};
+            return <div className="trim-page-row" key={page}>
+              <strong>Page {page}</strong>
+              <label>extra top <input type="range" min="0" max="12" step="0.5" value={(trim.topExtra || 0) * 100} onChange={(e) => updateTrim(page, 'topExtra', e.target.value)} /><span>{((trim.topExtra || 0) * 100).toFixed(1)}%</span></label>
+              <label>extra bottom <input type="range" min="0" max="12" step="0.5" value={(trim.bottomExtra || 0) * 100} onChange={(e) => updateTrim(page, 'bottomExtra', e.target.value)} /><span>{((trim.bottomExtra || 0) * 100).toFixed(1)}%</span></label>
+            </div>;
+          })}
+        </div>
+      </div>
+
       <div className="preview-grid">
         <div className="layout-editor-panel">
-          <div className="panel-heading"><div><h3>Continuous cleaned question</h3><p>Drag purple page-break lines. They snap near blue part boundaries.</p></div><span className="panel-note">Source crop unchanged</span></div>
-          <StripBreakEditor strip={strip} breaks={breaks} onBreaksChange={onBreaksChange} />
+          <div className="panel-heading"><div><h3>Continuous question</h3><p>{excludeMode ? 'Drag across unwanted blank space to exclude it. Double-click an excluded band to restore it.' : 'Drag purple page breaks. Blue lines show part starts.'}</p></div><span className="panel-note">{savedExclusions.length} excluded gap{savedExclusions.length === 1 ? '' : 's'}</span></div>
+          <StripBreakEditor strip={strip} breaks={savedBreaks || []} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={onExclusionsChange} excludeMode={excludeMode} />
         </div>
         <div className="final-pages-panel">
-          <div className="panel-heading"><div><h3>Final pages</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div><span className="panel-note">What compilation will use</span></div>
+          <div className="panel-heading"><div><h3>Final pages</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div><span className="panel-note">Excluded gaps removed</span></div>
           <div className="final-page-list">
             {finalPages.map((src, index) => <div className="preview-page-card" key={`${region.id}-${index}`}><span>Page {index + 1}</span><img src={src} alt={`${region.label} final page ${index + 1}`} /></div>)}
           </div>
@@ -769,11 +894,20 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
   );
 }
 
-function StripBreakEditor({ strip, breaks, onBreaksChange }) {
+function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusionsChange, excludeMode }) {
   const containerRef = useRef(null);
-  function updateBreak(index, event) {
+  const [draftExclude, setDraftExclude] = useState(null);
+
+  function fractionFromEvent(event) {
     const rect = containerRef.current.getBoundingClientRect();
-    let fraction = clamp((event.clientY - rect.top) / rect.height, 0.02, 0.98);
+    return clamp((event.clientY - rect.top) / rect.height, 0, 1);
+  }
+
+  function updateBreak(index, event) {
+    let fraction = clamp(fractionFromEvent(event), 0.02, 0.98);
+    const normalizedExclusions = normalizeExclusions(exclusions);
+    const inside = normalizedExclusions.find((range) => fraction > range.start && fraction < range.end);
+    if (inside) fraction = Math.abs(fraction - inside.start) < Math.abs(inside.end - fraction) ? inside.start : inside.end;
     const nearestPart = strip.partFractions.reduce((best, part) => {
       const distance = Math.abs(part.fraction - fraction);
       return !best || distance < best.distance ? { distance, fraction: part.fraction } : best;
@@ -786,7 +920,8 @@ function StripBreakEditor({ strip, breaks, onBreaksChange }) {
     nextBreaks[index] = round4(fraction);
     onBreaksChange(nextBreaks.sort((a, b) => a - b));
   }
-  function beginDrag(event, index) {
+
+  function beginBreakDrag(event, index) {
     event.preventDefault(); event.stopPropagation();
     const target = event.currentTarget;
     const pointerId = event.pointerId;
@@ -798,12 +933,42 @@ function StripBreakEditor({ strip, breaks, onBreaksChange }) {
     };
     target.addEventListener('pointermove', move); target.addEventListener('pointerup', up); target.addEventListener('pointercancel', up);
   }
+
+  function beginExclude(event) {
+    if (!excludeMode || event.target.closest('.page-break-line') || event.target.closest('.excluded-band')) return;
+    event.preventDefault();
+    const start = fractionFromEvent(event);
+    setDraftExclude({ start, end: start });
+    const target = event.currentTarget;
+    const pointerId = event.pointerId;
+    target.setPointerCapture(pointerId);
+    const move = (moveEvent) => setDraftExclude({ start, end: fractionFromEvent(moveEvent) });
+    const up = (upEvent) => {
+      const end = fractionFromEvent(upEvent);
+      const low = Math.min(start, end); const high = Math.max(start, end);
+      if (high - low > 0.006) onExclusionsChange(normalizeExclusions([...(exclusions || []), { id: makeId('exclude'), start: round4(low), end: round4(high) }]));
+      setDraftExclude(null);
+      try { target.releasePointerCapture(pointerId); } catch (_) {}
+      target.removeEventListener('pointermove', move); target.removeEventListener('pointerup', up); target.removeEventListener('pointercancel', up);
+    };
+    target.addEventListener('pointermove', move); target.addEventListener('pointerup', up); target.addEventListener('pointercancel', up);
+  }
+
+  const draftTop = draftExclude ? Math.min(draftExclude.start, draftExclude.end) : 0;
+  const draftHeight = draftExclude ? Math.abs(draftExclude.end - draftExclude.start) : 0;
+
   return (
-    <div ref={containerRef} className="strip-editor">
+    <div ref={containerRef} className={`strip-editor ${excludeMode ? 'exclude-mode' : ''}`} onPointerDown={beginExclude}>
       <img src={strip.dataUrl} alt="Continuous cleaned question" />
       {strip.partFractions.map((part) => <div key={part.id} className="preview-part-guide" style={{ top: `${part.fraction * 100}%` }}><span>{part.label}</span></div>)}
+      {normalizeExclusions(exclusions).map((range, index) => (
+        <div key={range.id || `exclude-${index}`} className="excluded-band" style={{ top: `${range.start * 100}%`, height: `${(range.end - range.start) * 100}%` }} onDoubleClick={(event) => { event.stopPropagation(); onExclusionsChange((exclusions || []).filter((item) => item.id !== range.id)); }} title="Excluded from final output. Double-click to restore.">
+          <span>EXCLUDED · double-click to restore</span>
+        </div>
+      ))}
+      {draftExclude && <div className="excluded-band draft" style={{ top: `${draftTop * 100}%`, height: `${draftHeight * 100}%` }}><span>Exclude this gap</span></div>}
       {breaks.map((fraction, index) => (
-        <div key={`break-${index}`} className="page-break-line" style={{ top: `${fraction * 100}%` }} onPointerDown={(event) => beginDrag(event, index)}>
+        <div key={`break-${index}`} className="page-break-line" style={{ top: `${fraction * 100}%` }} onPointerDown={(event) => beginBreakDrag(event, index)}>
           <span>PAGE {index + 1} END ↕</span>
         </div>
       ))}

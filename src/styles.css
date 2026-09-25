@@ -119,3 +119,27 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
   .document-area { padding: 18px 8px 40px; overflow-x: auto; }.page-label { display: none; }
   .preview-toolbar { align-items: stretch; flex-direction: column; }
 }
+
+/* Review cleanup tools */
+.preview-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.preview-actions kbd { margin-left: 5px; padding: 1px 5px; border: 1px solid #cbd5e1; border-bottom-width: 2px; border-radius: 5px; background: #fff; color: #334155; font: 700 .68rem/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.ghost.active-tool { border-color: #64748b; background: #eef2f7; color: #172033; box-shadow: inset 0 0 0 2px rgba(23,32,51,.06); }
+.review-trim-card { margin: -4px 0 18px; padding: 14px 16px; border: 1px solid #dbe2ea; border-radius: 12px; background: #fff; }
+.review-trim-card > div:first-child { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.review-trim-card > div:first-child span { color: #718096; font-size: .75rem; }
+.trim-page-grid { display: grid; gap: 8px; }
+.trim-page-row { display: grid; grid-template-columns: 72px 1fr 1fr; gap: 12px; align-items: center; padding: 8px 10px; border: 1px solid #e6ebf1; border-radius: 9px; background: #f8fafc; }
+.trim-page-row > strong { font-size: .77rem; }
+.trim-page-row label { display: grid; grid-template-columns: 72px 1fr 44px; gap: 7px; align-items: center; margin: 0; font-size: .7rem; color: #59677a; }
+.trim-page-row input[type="range"] { width: 100%; }
+.trim-page-row span { text-align: right; font-variant-numeric: tabular-nums; color: #334155; }
+.strip-editor.exclude-mode { cursor: crosshair; }
+.excluded-band { position: absolute; left: 0; right: 0; z-index: 6; min-height: 8px; background: rgba(100,116,139,.30); border-top: 2px dashed rgba(71,85,105,.75); border-bottom: 2px dashed rgba(71,85,105,.75); cursor: pointer; }
+.excluded-band span { position: sticky; top: 4px; display: inline-block; margin: 4px 8px; padding: 3px 6px; border-radius: 5px; background: rgba(51,65,85,.88); color: #fff; font-size: 9px; font-weight: 850; }
+.excluded-band.draft { z-index: 8; background: rgba(148,163,184,.38); pointer-events: none; }
+@media (max-width: 900px) {
+  .trim-page-row { grid-template-columns: 1fr; }
+  .trim-page-row label { grid-template-columns: 72px 1fr 44px; }
+  .preview-actions { justify-content: stretch; }
+  .preview-actions button { flex: 1; }
+}
