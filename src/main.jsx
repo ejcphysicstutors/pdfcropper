@@ -78,6 +78,7 @@ function App() {
   const [selectedLineId, setSelectedLineId] = useState(null);
   const [selectedSegmentId, setSelectedSegmentId] = useState(null);
   const [segmentLabelOverrides, setSegmentLabelOverrides] = useState({});
+  const [segmentPartFlags, setSegmentPartFlags] = useState({});
   const [lastSuggestionIds, setLastSuggestionIds] = useState([]);
   const [viewMode, setViewMode] = useState('segment');
   const [outputBreaks, setOutputBreaks] = useState({});
@@ -371,24 +372,51 @@ function App() {
       return found.sort((a, b) => comparePos({ page: a.page, y: a.yNorm }, { page: b.page, y: b.yNorm }));
     }
 
+    const detectedPartStarts = detectPartStarts();
+
+    function parsePartRaw(raw) {
+      if (!raw) return { alpha: null, roman: null };
+      const both = raw.match(/^\(([a-h])\)\(([ivxlcdm]+)\)$/i);
+      if (both) return { alpha: both[1].toLowerCase(), roman: both[2].toLowerCase() };
+      const alpha = raw.match(/^\(([a-h])\)$/i);
+      if (alpha) return { alpha: alpha[1].toLowerCase(), roman: null };
+      const roman = raw.match(/^\(([ivxlcdm]+)\)$/i);
+      if (roman) return { alpha: null, roman: roman[1].toLowerCase() };
+      return { alpha: null, roman: null };
+    }
+
     function markerForSegment(start, end) {
+      // Prefer the printed part marker nearest the segment start. This remains
+      // robust when a teacher places the blue line a few pixels above or below
+      // the actual (a)/(ii) text.
+      const nearby = detectedPartStarts
+        .filter((part) => comparePos(part, end) < 0)
+        .map((part) => ({ part, delta: posKey(part) - posKey(start) }))
+        .filter(({ part, delta }) => {
+          if (part.page !== start.page) return false;
+          // Allow the printed marker to sit just above a manually placed blue line,
+          // but do not accidentally reuse a marker from the previous segment.
+          return delta >= -250 && delta <= 800;
+        })
+        .sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta))[0];
+      if (nearby) return parsePartRaw(nearby.part.raw);
+
+      // For the first segment, the printed marker can be well below START.
+      // Use the first marker actually contained in the segment.
+      const firstInside = detectedPartStarts.find((part) => comparePos(part, start) >= 0 && comparePos(part, end) < 0);
+      if (firstInside) return parsePartRaw(firstInside.raw);
+
+      // Text-row fallback for PDFs whose text extraction merged markers oddly.
       const rows = rowsInside(start, end);
-      let alpha = null;
-      let roman = null;
       for (const row of rows) {
         const alphaRoman = row.text.match(/(?:^|\s)\(([a-h])\)\s*\(([ivxlcdm]+)\)(?=\s|$)/i);
         if (alphaRoman) return { alpha: alphaRoman[1].toLowerCase(), roman: alphaRoman[2].toLowerCase() };
-        if (!alpha) {
-          const alphaMatch = row.text.match(/(?:^|\s)\(([a-h])\)(?=\s|$)/i);
-          if (alphaMatch) alpha = alphaMatch[1].toLowerCase();
-        }
-        if (!roman) {
-          const romanMatch = row.text.match(/(?:^|\s)\(([ivxlcdm]+)\)(?=\s|$)/i);
-          if (romanMatch) roman = romanMatch[1].toLowerCase();
-        }
-        if (alpha && roman) break;
+        const alphaMatch = row.text.match(/(?:^|\s)\(([a-h])\)(?=\s|$)/i);
+        if (alphaMatch) return { alpha: alphaMatch[1].toLowerCase(), roman: null };
+        const romanMatch = row.text.match(/(?:^|\s)\(([ivxlcdm]+)\)(?=\s|$)/i);
+        if (romanMatch) return { alpha: null, roman: romanMatch[1].toLowerCase() };
       }
-      return { alpha, roman };
+      return { alpha: null, roman: null };
     }
 
     return starts.map((start, index) => {
@@ -418,6 +446,7 @@ function App() {
         if (currentAlpha) inferred += `(${currentAlpha})`;
         if (currentRoman) inferred += `(${currentRoman})`;
         const override = segmentLabelOverrides[boundary.id];
+        const isPart = segmentPartFlags[boundary.id] !== false;
         return {
           id: boundary.id,
           start: boundary,
@@ -425,11 +454,12 @@ function App() {
           label: override || inferred || `${fallbackLabel} part ${segmentIndex + 1}`,
           autoLabel: inferred,
           labelEditedByUser: Boolean(override),
+          isPart,
         };
       });
       return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end), label: fallbackLabel, parts, segments };
     });
-  }, [lines, footerPct, pages, segmentLabelOverrides]);
+  }, [lines, footerPct, pages, segmentLabelOverrides, segmentPartFlags]);
 
   useEffect(() => {
     if (!regions.length) { setSelectedQuestionId(null); return; }
@@ -455,6 +485,7 @@ function App() {
         segments: region.segments.map((segment) => ({
           label: segment.label,
           labelEditedByUser: Boolean(segment.labelEditedByUser),
+          isPart: segment.isPart !== false,
           start: { page: segment.start.page, yFractionFromTop: round4(segment.start.y) },
           end: { page: segment.end.page, yFractionFromTop: round4(segment.end.y) },
         })),
@@ -563,15 +594,22 @@ function App() {
                     <label>Question label<input value={selectedRegion.start.label || selectedRegion.label} onChange={(e) => updateLineLabel(selectedRegion.start.id, e.target.value)} /></label>
                     <div className="segment-label-list">
                       {selectedRegion.segments.map((segment) => (
-                        <button key={segment.id} type="button" className={`segment-label-row ${selectedSegmentId === segment.id ? 'selected' : ''}`} onClick={() => setSelectedSegmentId(segment.id)}>
-                          <span>{segment.label}</span><small>{segment.labelEditedByUser ? 'edited' : 'auto'}</small>
+                        <button key={segment.id} type="button" className={`segment-label-row ${selectedSegmentId === segment.id ? 'selected' : ''} ${segment.isPart === false ? 'not-part' : ''}`} onClick={() => setSelectedSegmentId(segment.id)}>
+                          <span>{segment.isPart === false ? 'Not a part' : segment.label}</span><small>{segment.isPart === false ? 'excluded' : (segment.labelEditedByUser ? 'edited' : 'auto')}</small>
                         </button>
                       ))}
                     </div>
                     {selectedRegion.segments.map((segment) => selectedSegmentId === segment.id && (
-                      <label key={`edit-${segment.id}`}>Selected segment
-                        <input value={segment.label} onChange={(e) => setSegmentLabelOverrides((current) => ({ ...current, [segment.id]: e.target.value }))} />
-                      </label>
+                      <div key={`edit-${segment.id}`} className="selected-segment-editor">
+                        <label>Selected segment
+                          <input value={segment.label} disabled={segment.isPart === false} onChange={(e) => setSegmentLabelOverrides((current) => ({ ...current, [segment.id]: e.target.value }))} />
+                        </label>
+                        <label className="check-row segment-part-toggle">
+                          <input type="checkbox" checked={segment.isPart !== false} onChange={(e) => setSegmentPartFlags((current) => ({ ...current, [segment.id]: e.target.checked }))} />
+                          Treat this region as a question part
+                        </label>
+                        {segment.isPart === false && <p className="small">The content remains inside the whole-question crop, but this final region will not be tagged or exported as a question part.</p>}
+                      </div>
                     ))}
                     {selectedSegmentId && segmentLabelOverrides[selectedSegmentId] && (
                       <button type="button" className="ghost full" onClick={() => setSegmentLabelOverrides((current) => { const next = { ...current }; delete next[selectedSegmentId]; return next; })}>Use automatic label</button>
@@ -723,8 +761,8 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
           const heightPct = ((bottomNorm - topNorm) / visibleHeight) * 100;
           const selected = selectedQuestionId === region.id && selectedSegmentId === segment.id;
           return (
-            <div key={`${region.id}-${segment.id}-${pageData.pageNumber}`} className={`segment-overlay ${selected ? 'selected' : ''}`} style={{ top: `${topPct}%`, height: `${heightPct}%` }}>
-              <button type="button" className="segment-watermark" onClick={(e) => { e.stopPropagation(); onSelectSegment(region.id, segment.id); }} title="Click to edit this segment label">{segment.label}</button>
+            <div key={`${region.id}-${segment.id}-${pageData.pageNumber}`} className={`segment-overlay ${selected ? 'selected' : ''} ${segment.isPart === false ? 'not-part' : ''}`} style={{ top: `${topPct}%`, height: `${heightPct}%` }}>
+              <button type="button" className="segment-watermark" onClick={(e) => { e.stopPropagation(); onSelectSegment(region.id, segment.id); }} title="Click to edit this segment label">{segment.isPart === false ? 'NOT A PART' : segment.label}</button>
             </div>
           );
         })}

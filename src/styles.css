@@ -153,3 +153,11 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
   .preview-actions { justify-content: stretch; }
   .preview-actions button { flex: 1; }
 }
+
+.segment-label-row.not-part { border-color: #c7ced8; background: #f5f7fa; color: #66758a; }
+.segment-label-row.not-part small { color: #8b96a6; }
+.selected-segment-editor { display: grid; gap: 10px; }
+.segment-part-toggle { margin-top: 2px; padding: 9px 10px; border-radius: 8px; background: #f7f9fc; border: 1px solid #e1e7ef; }
+.segment-overlay.not-part { border-left-color: rgba(100,116,139,.26); background: rgba(100,116,139,.035); }
+.segment-overlay.not-part .segment-watermark { background: rgba(100,116,139,.10); color: rgba(71,85,105,.40); font-size: 1.15rem; letter-spacing: .01em; }
+.segment-overlay.not-part.selected { background: rgba(100,116,139,.075); border-left-color: rgba(100,116,139,.55); }
