@@ -8,6 +8,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const round4 = (value) => Math.round(value * 10000) / 10000;
+const QUESTION_CUT = 'question';
+const PART_CUT = 'part';
 
 function App() {
   const [file, setFile] = useState(null);
@@ -16,6 +18,7 @@ function App() {
   const [headerPct, setHeaderPct] = useState(6);
   const [footerPct, setFooterPct] = useState(6);
   const [cuts, setCuts] = useState({});
+  const [cutMode, setCutMode] = useState(QUESTION_CUT);
   const [status, setStatus] = useState('Choose a PDF to begin.');
   const [loading, setLoading] = useState(false);
   const [showGuides, setShowGuides] = useState(true);
@@ -49,7 +52,7 @@ function App() {
         nextPages.push({ pageNumber, page, viewport, textContent });
       }
       setPages(nextPages);
-      setStatus(`${loadedPdf.numPages} pages loaded. Review the header/footer masks, then add or adjust cut lines.`);
+      setStatus(`${loadedPdf.numPages} pages loaded. Review the header/footer masks, then scan the proposed question and part boundaries.`);
     } catch (error) {
       console.error(error);
       setStatus('Could not open this PDF. Please try another file.');
@@ -61,41 +64,61 @@ function App() {
     }
   }
 
-  function addCut(pageNumber, yNorm) {
+  function addCut(pageNumber, yNorm, type = cutMode) {
     const top = headerPct / 100;
     const bottom = 1 - footerPct / 100;
     const safeY = round4(clamp(yNorm, top + 0.005, bottom - 0.005));
     setCuts((current) => {
       const existing = current[pageNumber] || [];
-      if (existing.some((value) => Math.abs(value - safeY) < 0.01)) return current;
+      if (existing.some((cut) => Math.abs(cut.y - safeY) < 0.01)) return current;
       return {
         ...current,
-        [pageNumber]: [...existing, safeY].sort((a, b) => a - b),
+        [pageNumber]: [...existing, makeCut(safeY, type)].sort((a, b) => a.y - b.y),
       };
     });
   }
 
-  function moveCut(pageNumber, index, yNorm) {
+  function moveCut(pageNumber, cutId, yNorm) {
     const top = headerPct / 100;
     const bottom = 1 - footerPct / 100;
     const safeY = round4(clamp(yNorm, top + 0.005, bottom - 0.005));
     setCuts((current) => {
-      const next = [...(current[pageNumber] || [])];
-      next[index] = safeY;
-      next.sort((a, b) => a - b);
+      const next = (current[pageNumber] || []).map((cut) =>
+        cut.id === cutId ? { ...cut, y: safeY } : cut
+      );
+      next.sort((a, b) => a.y - b.y);
       return { ...current, [pageNumber]: next };
     });
   }
 
-  function removeCut(pageNumber, index) {
+  function removeCut(pageNumber, cutId) {
     setCuts((current) => ({
       ...current,
-      [pageNumber]: (current[pageNumber] || []).filter((_, i) => i !== index),
+      [pageNumber]: (current[pageNumber] || []).filter((cut) => cut.id !== cutId),
+    }));
+  }
+
+  function changeCutType(pageNumber, cutId) {
+    setCuts((current) => ({
+      ...current,
+      [pageNumber]: (current[pageNumber] || []).map((cut) =>
+        cut.id === cutId
+          ? { ...cut, type: cut.type === QUESTION_CUT ? PART_CUT : QUESTION_CUT }
+          : cut
+      ),
     }));
   }
 
   function clearCuts() {
     setCuts({});
+  }
+
+  function makeCut(y, type) {
+    return {
+      id: `${type}-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`,
+      y: round4(y),
+      type,
+    };
   }
 
   function suggestCuts() {
@@ -111,7 +134,7 @@ function App() {
         const text = String(item.str || '').trim();
         if (!text) continue;
 
-        // Conservative heuristic: a standalone question number near the left margin.
+        // Conservative heuristic: a standalone whole-question number near the left margin.
         const looksLikeQuestion = /^(?:Q\s*)?\d{1,2}[.)]?$/i.test(text);
         if (!looksLikeQuestion) continue;
 
@@ -133,17 +156,15 @@ function App() {
         }
       }
 
-      // The first visible question on a page does not always need a cut, but keeping
-      // suggestions conservative is safer than inventing many boundaries.
-      if (unique.length) suggested[pageNumber] = unique;
+      if (unique.length) suggested[pageNumber] = unique.map((y) => makeCut(y, QUESTION_CUT));
     }
 
     setCuts(suggested);
     const count = Object.values(suggested).reduce((sum, list) => sum + list.length, 0);
     setStatus(
       count
-        ? `${count} possible question starts found. Please scan and adjust them before confirming.`
-        : 'No reliable question-number starts were found. Add cut lines by clicking the pages.'
+        ? `${count} possible whole-question starts found. Red lines are whole questions; add blue part cuts where useful.`
+        : 'No reliable whole-question starts were found. Add red question cuts or blue part cuts by clicking the pages.'
     );
   }
 
@@ -151,17 +172,25 @@ function App() {
     if (!file || !pages.length) return;
 
     const payload = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       sourceFile: file.name,
       createdAt: new Date().toISOString(),
       headerFraction: round4(headerPct / 100),
       footerFraction: round4(footerPct / 100),
       pageCount: pages.length,
-      cuts: pages.map(({ pageNumber }) => ({
-        page: pageNumber,
-        yFractionsFromTop: (cuts[pageNumber] || []).map(round4),
-      })),
-      notes: 'Cut positions are fractions of the original PDF page height measured from the top edge.',
+      cuts: pages.map(({ pageNumber }) => {
+        const pageCuts = cuts[pageNumber] || [];
+        return {
+          page: pageNumber,
+          // Kept for backwards compatibility with the first version.
+          yFractionsFromTop: pageCuts.map((cut) => round4(cut.y)),
+          cutLines: pageCuts.map((cut) => ({
+            yFractionFromTop: round4(cut.y),
+            type: cut.type,
+          })),
+        };
+      }),
+      notes: 'Cut positions are fractions of the original PDF page height measured from the top edge. question = whole-question boundary; part = part-question boundary.',
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -171,13 +200,20 @@ function App() {
     anchor.download = `${file.name.replace(/\.pdf$/i, '')}.segmentation.json`;
     anchor.click();
     URL.revokeObjectURL(url);
-    setStatus('Segmentation file saved. Keep it together with the original PDF.');
+    setStatus('Segmentation file saved with whole-question and part-question boundaries.');
   }
 
-  const cutCount = useMemo(
-    () => Object.values(cuts).reduce((sum, pageCuts) => sum + pageCuts.length, 0),
-    [cuts]
-  );
+  const counts = useMemo(() => {
+    let question = 0;
+    let part = 0;
+    Object.values(cuts).forEach((pageCuts) => {
+      pageCuts.forEach((cut) => {
+        if (cut.type === PART_CUT) part += 1;
+        else question += 1;
+      });
+    });
+    return { question, part, total: question + part };
+  }, [cuts]);
 
   return (
     <div className="app-shell">
@@ -232,19 +268,42 @@ function App() {
           </section>
 
           <section>
-            <h2>2. Question cuts</h2>
-            <p className="small">Click anywhere on a page to add a cut. Drag a red line to move it. Double-click a line to remove it.</p>
-            <div className="button-stack">
-              <button className="secondary" onClick={suggestCuts} disabled={!pages.length || loading}>Suggest cuts</button>
-              <button className="ghost" onClick={clearCuts} disabled={!cutCount}>Clear cuts</button>
+            <h2>2. Question & part cuts</h2>
+            <div className="cut-mode-picker" role="group" aria-label="Cut type">
+              <button
+                className={`cut-mode question-mode ${cutMode === QUESTION_CUT ? 'active' : ''}`}
+                onClick={() => setCutMode(QUESTION_CUT)}
+                type="button"
+              >
+                <span className="mode-swatch question-swatch" />
+                Whole question
+              </button>
+              <button
+                className={`cut-mode part-mode ${cutMode === PART_CUT ? 'active' : ''}`}
+                onClick={() => setCutMode(PART_CUT)}
+                type="button"
+              >
+                <span className="mode-swatch part-swatch" />
+                Part
+              </button>
             </div>
-            <div className="metric"><span>Cut lines</span><strong>{cutCount}</strong></div>
+            <p className="small">
+              Click a page to add the selected cut. Hold <strong>Shift</strong> while clicking for a blue part cut. Drag to move; double-click to remove; click the handle to switch red ↔ blue.
+            </p>
+            <div className="button-stack">
+              <button className="secondary" onClick={suggestCuts} disabled={!pages.length || loading}>Suggest question cuts</button>
+              <button className="ghost" onClick={clearCuts} disabled={!counts.total}>Clear cuts</button>
+            </div>
+            <div className="metric-stack">
+              <div className="metric"><span><i className="metric-dot question-dot" />Question cuts</span><strong>{counts.question}</strong></div>
+              <div className="metric"><span><i className="metric-dot part-dot" />Part cuts</span><strong>{counts.part}</strong></div>
+            </div>
           </section>
 
           <section>
             <h2>3. Confirm</h2>
             <button className="primary full" onClick={exportSegmentation} disabled={!file || !pages.length}>Save segmentation</button>
-            <p className="small">This saves a small JSON file. Keep it beside the original PDF so the paper can be reconstructed later.</p>
+            <p className="small">The JSON keeps both whole-question and part-question boundaries beside the original PDF.</p>
           </section>
 
           <div className="status-box">{status}</div>
@@ -271,9 +330,11 @@ function App() {
                   headerPct={headerPct}
                   footerPct={footerPct}
                   cuts={cuts[pageData.pageNumber] || []}
+                  cutMode={cutMode}
                   onAddCut={addCut}
                   onMoveCut={moveCut}
                   onRemoveCut={removeCut}
+                  onChangeCutType={changeCutType}
                   showGuides={showGuides}
                 />
               ))}
@@ -285,7 +346,7 @@ function App() {
   );
 }
 
-function PdfPage({ pageData, headerPct, footerPct, cuts, onAddCut, onMoveCut, onRemoveCut, showGuides }) {
+function PdfPage({ pageData, headerPct, footerPct, cuts, cutMode, onAddCut, onMoveCut, onRemoveCut, onChangeCutType, showGuides }) {
   const canvasRef = useRef(null);
   const frameRef = useRef(null);
   const [renderSize, setRenderSize] = useState({ width: pageData.viewport.width, height: pageData.viewport.height });
@@ -338,29 +399,31 @@ function PdfPage({ pageData, headerPct, footerPct, cuts, onAddCut, onMoveCut, on
 
   function handlePageClick(event) {
     if (event.target.closest('.cut-line')) return;
-    onAddCut(pageData.pageNumber, eventToYNorm(event));
+    const requestedType = event.shiftKey ? PART_CUT : cutMode;
+    onAddCut(pageData.pageNumber, eventToYNorm(event), requestedType);
   }
 
-  function beginDrag(event, cutIndex) {
+  function beginDrag(event, cutId) {
     event.preventDefault();
     event.stopPropagation();
     const pointerId = event.pointerId;
-    event.currentTarget.setPointerCapture(pointerId);
+    const target = event.currentTarget;
+    target.setPointerCapture(pointerId);
 
     const onMove = (moveEvent) => {
-      onMoveCut(pageData.pageNumber, cutIndex, eventToYNorm(moveEvent));
+      onMoveCut(pageData.pageNumber, cutId, eventToYNorm(moveEvent));
     };
 
-    const onUp = (upEvent) => {
-      try { event.currentTarget.releasePointerCapture(pointerId); } catch (_) {}
-      event.currentTarget.removeEventListener('pointermove', onMove);
-      event.currentTarget.removeEventListener('pointerup', onUp);
-      event.currentTarget.removeEventListener('pointercancel', onUp);
+    const onUp = () => {
+      try { target.releasePointerCapture(pointerId); } catch (_) {}
+      target.removeEventListener('pointermove', onMove);
+      target.removeEventListener('pointerup', onUp);
+      target.removeEventListener('pointercancel', onUp);
     };
 
-    event.currentTarget.addEventListener('pointermove', onMove);
-    event.currentTarget.addEventListener('pointerup', onUp);
-    event.currentTarget.addEventListener('pointercancel', onUp);
+    target.addEventListener('pointermove', onMove);
+    target.addEventListener('pointerup', onUp);
+    target.addEventListener('pointercancel', onUp);
   }
 
   const frameHeight = renderSize.height * visibleHeight;
@@ -384,21 +447,33 @@ function PdfPage({ pageData, headerPct, footerPct, cuts, onAddCut, onMoveCut, on
           </>
         )}
 
-        {cuts.map((yNorm, index) => {
-          const yVisible = ((yNorm - visibleTop) / visibleHeight) * 100;
+        {cuts.map((cut) => {
+          const yVisible = ((cut.y - visibleTop) / visibleHeight) * 100;
+          const isPart = cut.type === PART_CUT;
           return (
             <div
-              key={`${yNorm}-${index}`}
-              className="cut-line"
+              key={cut.id}
+              className={`cut-line ${isPart ? 'part-cut' : 'question-cut'}`}
               style={{ top: `${yVisible}%` }}
-              onPointerDown={(event) => beginDrag(event, index)}
+              onPointerDown={(event) => beginDrag(event, cut.id)}
               onDoubleClick={(event) => {
                 event.stopPropagation();
-                onRemoveCut(pageData.pageNumber, index);
+                onRemoveCut(pageData.pageNumber, cut.id);
               }}
-              title="Drag to move. Double-click to remove."
+              title={`${isPart ? 'Part cut' : 'Whole-question cut'}. Drag to move. Double-click to remove.`}
             >
-              <span className="cut-handle">↕</span>
+              <button
+                className="cut-handle"
+                type="button"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onChangeCutType(pageData.pageNumber, cut.id);
+                }}
+                title="Click to switch between whole-question and part cut"
+              >
+                {isPart ? 'P' : 'Q'}
+              </button>
             </div>
           );
         })}
