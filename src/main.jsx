@@ -48,6 +48,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [showGuides, setShowGuides] = useState(true);
   const [selectedQuestionId, setSelectedQuestionId] = useState(null);
+  const [selectedLineId, setSelectedLineId] = useState(null);
   const [lastSuggestionIds, setLastSuggestionIds] = useState([]);
   const fileInputRef = useRef(null);
 
@@ -73,6 +74,21 @@ function App() {
 
     function handleShortcutDown(event) {
       if (event.ctrlKey || event.metaKey || event.altKey || isTypingTarget(event.target)) return;
+
+      if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && selectedLineId) {
+        const direction = event.key === 'ArrowUp' ? -1 : 1;
+        const step = event.shiftKey ? 0.005 : 0.001;
+        const top = headerPct / 100 + 0.004;
+        const bottom = 1 - footerPct / 100 - 0.004;
+        setLines((current) => current.map((line) => line.id === selectedLineId
+          ? { ...line, y: round4(clamp(line.y + direction * step, top, bottom)), source: 'manual' }
+          : line).sort(comparePos));
+        setLastSuggestionIds((ids) => ids.filter((item) => item !== selectedLineId));
+        setStatus(`Selected line moved ${event.key === 'ArrowUp' ? 'up' : 'down'} ${event.shiftKey ? '5' : '1'} fine step${event.shiftKey ? 's' : ''}.`);
+        event.preventDefault();
+        return;
+      }
+
       const mode = keyToMode(event.key);
       if (!mode) return;
 
@@ -100,7 +116,7 @@ function App() {
       window.removeEventListener('keyup', handleShortcutUp);
       window.removeEventListener('blur', clearHeldMode);
     };
-  }, []);
+  }, [selectedLineId, headerPct, footerPct]);
 
   async function openPdf(selected) {
     if (!selected) return;
@@ -110,6 +126,7 @@ function App() {
     setLines([]);
     setLastSuggestionIds([]);
     setSelectedQuestionId(null);
+    setSelectedLineId(null);
 
     try {
       const bytes = new Uint8Array(await selected.arrayBuffer());
@@ -146,6 +163,7 @@ function App() {
   function addLine(page, y, kind = lineMode) {
     const newLine = { id: makeId(kind), page, y: safeY(y), kind, label: '', manualLabel: false, source: 'manual' };
     setLines((current) => [...current, newLine].sort(comparePos));
+    setSelectedLineId(newLine.id);
   }
 
   function moveLine(id, page, y) {
@@ -156,6 +174,7 @@ function App() {
   function removeLine(id) {
     setLines((current) => current.filter((line) => line.id !== id));
     setLastSuggestionIds((ids) => ids.filter((item) => item !== id));
+    setSelectedLineId((current) => current === id ? null : current);
   }
 
   function updateLineLabel(id, label) {
@@ -167,6 +186,7 @@ function App() {
     setLines([]);
     setLastSuggestionIds([]);
     setSelectedQuestionId(null);
+    setSelectedLineId(null);
   }
 
   function undoLastSuggestions() {
@@ -435,7 +455,7 @@ function App() {
               <button className={`line-mode part-mode ${(heldLineMode || lineMode) === PART ? 'active' : ''}`} onClick={() => setLineMode(PART)}><span className="mode-swatch part-swatch" />Part <kbd>P</kbd></button>
             </div>
             <div className="shortcut-strip"><span><kbd>S</kbd> Start</span><span><kbd>E</kbd> End</span><span><kbd>P</kbd> Part</span></div>
-            <p className="small">Press <strong>S</strong>, <strong>E</strong> or <strong>P</strong> at any time, then click the rolling paper. You can also hold the key while clicking. Drag to move; double-click to remove. Suggestions only add missing lines and never replace your manual work.</p>
+            <p className="small">Press <strong>S</strong>, <strong>E</strong> or <strong>P</strong> at any time, then click the rolling paper. You can also hold the key while clicking. Click a line to select it, then use <strong>↑ / ↓</strong> for fine adjustment; hold <strong>Shift</strong> for a larger step. Drag to move; double-click to remove. Suggestions only add missing lines and never replace your manual work.</p>
             <div className="button-stack">
               <button className="secondary" onClick={suggestRegions} disabled={!pages.length || loading}>Suggest regions</button>
               <button className="ghost" onClick={undoLastSuggestions} disabled={!lastSuggestionIds.length}>Undo suggestions</button>
@@ -493,7 +513,7 @@ function App() {
                   {pages.map((pageData) => (
                     <PdfPage key={pageData.pageNumber} pageData={pageData} headerPct={headerPct} footerPct={footerPct}
                       lines={lines.filter((line) => line.page === pageData.pageNumber)} lineMode={heldLineMode || lineMode} onAddLine={addLine}
-                      onMoveLine={moveLine} onRemoveLine={removeLine} showGuides={showGuides} regions={regions} />
+                      onMoveLine={moveLine} onRemoveLine={removeLine} showGuides={showGuides} regions={regions} selectedLineId={selectedLineId} onSelectLine={setSelectedLineId} />
                   ))}
                 </div>
               </div>
@@ -511,7 +531,7 @@ function App() {
   );
 }
 
-function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, onMoveLine, onRemoveLine, showGuides, regions }) {
+function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, onMoveLine, onRemoveLine, showGuides, regions, selectedLineId, onSelectLine }) {
   const canvasRef = useRef(null);
   const frameRef = useRef(null);
   const [renderSize, setRenderSize] = useState({ width: pageData.viewport.width, height: pageData.viewport.height });
@@ -581,7 +601,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
         {lines.map((line) => {
           const yVisible = ((line.y - visibleTop) / visibleHeight) * 100;
           return (
-            <div key={line.id} className={`crop-line ${line.kind} ${line.source === 'suggested' ? 'suggested-line' : 'confirmed-line'}`} style={{ top: `${yVisible}%` }} onPointerDown={(e) => beginDrag(e, line.id)} onDoubleClick={(e) => { e.stopPropagation(); onRemoveLine(line.id); }} title="Drag to move. Double-click to remove.">
+            <div key={line.id} className={`crop-line ${line.kind} ${line.source === 'suggested' ? 'suggested-line' : 'confirmed-line'} ${selectedLineId === line.id ? 'selected-line' : ''}`} style={{ top: `${yVisible}%` }} onClick={(e) => { e.stopPropagation(); onSelectLine(line.id); }} onPointerDown={(e) => { onSelectLine(line.id); beginDrag(e, line.id); }} onDoubleClick={(e) => { e.stopPropagation(); onRemoveLine(line.id); }} title="Click to select. Use Up/Down arrows for fine adjustment. Drag to move. Double-click to remove.">
               <span className="line-tag">{displayText(line)}</span>
             </div>
           );
