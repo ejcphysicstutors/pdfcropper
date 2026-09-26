@@ -137,6 +137,7 @@ function App() {
   const [outputBreaks, setOutputBreaks] = useState({});
   const [exclusions, setExclusions] = useState({});
   const [trimOverrides, setTrimOverrides] = useState({});
+  const [globalReviewTrim, setGlobalReviewTrim] = useState({ topExtra: 0, bottomExtra: 0 });
   const fileInputRef = useRef(null);
 
   useEffect(() => () => { if (pdf) pdf.destroy(); }, [pdf]);
@@ -624,7 +625,8 @@ function App() {
         labelEditedByUser: Boolean(line.manualLabel),
         source: line.source || 'manual',
       })),
-      notes: 'Question starts/ends define source ownership. Review-only trim overrides, excluded output ranges and publication page breaks alter layout only; they do not change source question ownership.',
+      globalReviewTrim: { extraTopFraction: round4(globalReviewTrim.topExtra || 0), extraBottomFraction: round4(globalReviewTrim.bottomExtra || 0) },
+      notes: 'Question starts/ends define source ownership. Review-only global/local trim overrides, excluded output ranges and publication page breaks alter layout only; they do not change source question ownership.',
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -803,6 +805,8 @@ function App() {
             <PreviewWorkspace pages={pages} region={selectedRegion} headerPct={headerPct} footerPct={footerPct}
               savedBreaks={selectedRegion ? outputBreaks[selectedRegion.id] : []}
               savedExclusions={selectedRegion ? exclusions[selectedRegion.id] || [] : []}
+              globalReviewTrim={globalReviewTrim}
+              onGlobalReviewTrimChange={setGlobalReviewTrim}
               trimOverrides={selectedRegion ? trimOverrides[selectedRegion.id] || {} : {}}
               onBreaksChange={(breaks) => selectedRegion && setOutputBreaks((current) => ({ ...current, [selectedRegion.id]: breaks }))}
               onExclusionsChange={(ranges) => selectedRegion && setExclusions((current) => ({ ...current, [selectedRegion.id]: ranges }))}
@@ -909,7 +913,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
   );
 }
 
-async function buildQuestionStrip(pages, region, headerPct, footerPct, trimOverrides = {}) {
+async function buildQuestionStrip(pages, region, headerPct, footerPct, globalReviewTrim = {}, trimOverrides = {}) {
   const relevant = pages.filter((p) => p.pageNumber >= region.start.page && p.pageNumber <= region.end.page);
   const fragments = [];
   const pageMaps = [];
@@ -923,8 +927,10 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, trimOverr
     await pageData.page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
 
     const trim = trimOverrides[pageData.pageNumber] || {};
-    let top = headerPct / 100 + (trim.topExtra || 0);
-    let bottom = 1 - footerPct / 100 - (trim.bottomExtra || 0);
+    const topExtra = trim.topExtra ?? globalReviewTrim.topExtra ?? 0;
+    const bottomExtra = trim.bottomExtra ?? globalReviewTrim.bottomExtra ?? 0;
+    let top = headerPct / 100 + topExtra;
+    let bottom = 1 - footerPct / 100 - bottomExtra;
     if (pageData.pageNumber === region.start.page) top = Math.max(top, region.start.y);
     if (pageData.pageNumber === region.end.page) bottom = Math.min(bottom, region.end.y);
     if (bottom <= top) continue;
@@ -991,11 +997,13 @@ function makeFinalPages(strip, breaks) {
     a4.width = 794; a4.height = 1123;
     const ctx = a4.getContext('2d');
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, a4.width, a4.height);
-    const scale = PAGE_CONTENT_WIDTH / strip.width;
-    const destHeight = sourceHeight * scale;
-    const safeHeight = Math.min(destHeight, PAGE_CONTENT_HEIGHT);
-    const sourceHeightToDraw = Math.min(sourceHeight, safeHeight / scale);
-    ctx.drawImage(strip, 0, startY, strip.width, sourceHeightToDraw, 44, 44, PAGE_CONTENT_WIDTH, sourceHeightToDraw * scale);
+    const widthScale = PAGE_CONTENT_WIDTH / strip.width;
+    const heightScale = PAGE_CONTENT_HEIGHT / sourceHeight;
+    const scale = Math.min(widthScale, heightScale);
+    const drawWidth = strip.width * scale;
+    const drawHeight = sourceHeight * scale;
+    const x = Math.round((a4.width - drawWidth) / 2);
+    ctx.drawImage(strip, 0, startY, strip.width, sourceHeight, x, 44, drawWidth, drawHeight);
     pages.push(a4.toDataURL('image/jpeg', 0.92));
   }
   return pages;
@@ -1068,11 +1076,12 @@ function buildCompactedStrip(strip, exclusions) {
   return { canvas: out, exclusions: normalized, originalToCompacted, compactedToOriginal };
 }
 
-function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, trimOverrides, onTrimOverridesChange }) {
+function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, globalReviewTrim, onGlobalReviewTrimChange, trimOverrides, onTrimOverridesChange }) {
   const [strip, setStrip] = useState(null);
   const [loading, setLoading] = useState(false);
   const [autoBreaks, setAutoBreaks] = useState([]);
   const [excludeMode, setExcludeMode] = useState(false);
+  const [individualTrimMode, setIndividualTrimMode] = useState(false);
 
   useEffect(() => {
     function onKeyDown(event) {
@@ -1091,7 +1100,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
     let cancelled = false;
     if (!region) { setStrip(null); return undefined; }
     setLoading(true);
-    buildQuestionStrip(pages, region, headerPct, footerPct, trimOverrides).then((result) => {
+    buildQuestionStrip(pages, region, headerPct, footerPct, globalReviewTrim, trimOverrides).then((result) => {
       if (cancelled) return;
       setStrip(result);
       if (!result) { setLoading(false); return; }
@@ -1106,7 +1115,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
       setLoading(false);
     }).catch((error) => { console.error(error); if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [pages, region?.id, region?.start.page, region?.start.y, region?.end.page, region?.end.y, headerPct, footerPct, JSON.stringify(trimOverrides)]);
+  }, [pages, region?.id, region?.start.page, region?.start.y, region?.end.page, region?.end.y, headerPct, footerPct, globalReviewTrim.topExtra, globalReviewTrim.bottomExtra, JSON.stringify(trimOverrides)]);
 
   if (!region) return <div className="preview-empty large">Select a question to review.</div>;
   if (loading || !strip) return <div className="loading-card">Building cleaned question preview…</div>;
@@ -1119,15 +1128,30 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
   const sourcePages = [];
   for (let page = region.start.page; page <= region.end.page; page += 1) sourcePages.push(page);
 
+  function updateGlobalTrim(field, valuePct) {
+    const value = clamp(Number(valuePct) / 100, 0, 0.12);
+    onGlobalReviewTrimChange({ ...globalReviewTrim, [field]: value });
+  }
+
   function updateTrim(page, field, valuePct) {
     const value = clamp(Number(valuePct) / 100, 0, 0.12);
-    onTrimOverridesChange({ ...trimOverrides, [page]: { ...(trimOverrides[page] || {}), [field]: value } });
+    const inherited = {
+      topExtra: trimOverrides[page]?.topExtra ?? globalReviewTrim.topExtra ?? 0,
+      bottomExtra: trimOverrides[page]?.bottomExtra ?? globalReviewTrim.bottomExtra ?? 0,
+    };
+    onTrimOverridesChange({ ...trimOverrides, [page]: { ...inherited, [field]: value } });
+  }
+
+  function resetPageTrim(page) {
+    const next = { ...trimOverrides };
+    delete next[page];
+    onTrimOverridesChange(next);
   }
 
   return (
     <div className="preview-review-workspace">
       <div className="preview-toolbar">
-        <div><p className="eyebrow">Review output</p><h2>{region.label}</h2><p>Use <strong>X</strong> or “Exclude gap” to remove unwanted answer space. Local page trims remove stubborn headers/footers without changing the whole paper.</p></div>
+        <div><p className="eyebrow">Review output</p><h2>{region.label}</h2><p>Use <strong>X</strong> or “Exclude gap” to remove unwanted answer space. Extra header/footer trim applies to every page by default; switch to individual pages only when one page differs.</p></div>
         <div className="preview-actions">
           <button className={`ghost ${excludeMode ? 'active-tool' : ''}`} onClick={() => setExcludeMode((value) => !value)}>Exclude gap <kbd>X</kbd></button>
           <button className="ghost" onClick={() => onBreaksChange(autoBreaks)}>Reset page breaks</button>
@@ -1135,17 +1159,34 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
       </div>
 
       <div className="review-trim-card">
-        <div><strong>Local source-page trim</strong><span>Use only when a header/footer survives the global cleanup.</span></div>
-        <div className="trim-page-grid">
-          {sourcePages.map((page) => {
-            const trim = trimOverrides[page] || {};
-            return <div className="trim-page-row" key={page}>
-              <strong>Page {page}</strong>
-              <label>extra top <input type="range" min="0" max="12" step="0.5" value={(trim.topExtra || 0) * 100} onChange={(e) => updateTrim(page, 'topExtra', e.target.value)} /><span>{((trim.topExtra || 0) * 100).toFixed(1)}%</span></label>
-              <label>extra bottom <input type="range" min="0" max="12" step="0.5" value={(trim.bottomExtra || 0) * 100} onChange={(e) => updateTrim(page, 'bottomExtra', e.target.value)} /><span>{((trim.bottomExtra || 0) * 100).toFixed(1)}%</span></label>
-            </div>;
-          })}
+        <div className="trim-card-heading">
+          <div><strong>{individualTrimMode ? 'Individual source-page trim' : 'Extra trim for all pages'}</strong><span>{individualTrimMode ? 'Only use this when a particular source page needs a different crop.' : 'Adjust once and the same extra trim is applied throughout the paper.'}</span></div>
+          <button className="ghost" onClick={() => setIndividualTrimMode((value) => !value)}>{individualTrimMode ? 'Use same trim for all pages' : 'Adjust pages individually'}</button>
         </div>
+        {!individualTrimMode ? (
+          <div className="trim-page-grid">
+            <div className="trim-page-row global-trim-row">
+              <strong>All pages</strong>
+              <label>extra top <input type="range" min="0" max="12" step="0.5" value={(globalReviewTrim.topExtra || 0) * 100} onChange={(e) => updateGlobalTrim('topExtra', e.target.value)} /><span>{((globalReviewTrim.topExtra || 0) * 100).toFixed(1)}%</span></label>
+              <label>extra bottom <input type="range" min="0" max="12" step="0.5" value={(globalReviewTrim.bottomExtra || 0) * 100} onChange={(e) => updateGlobalTrim('bottomExtra', e.target.value)} /><span>{((globalReviewTrim.bottomExtra || 0) * 100).toFixed(1)}%</span></label>
+            </div>
+          </div>
+        ) : (
+          <div className="trim-page-grid">
+            {sourcePages.map((page) => {
+              const trim = trimOverrides[page] || {};
+              const topValue = trim.topExtra ?? globalReviewTrim.topExtra ?? 0;
+              const bottomValue = trim.bottomExtra ?? globalReviewTrim.bottomExtra ?? 0;
+              const hasOverride = Boolean(trimOverrides[page]);
+              return <div className="trim-page-row" key={page}>
+                <strong>Page {page}{hasOverride ? ' · custom' : ' · inherited'}</strong>
+                <label>extra top <input type="range" min="0" max="12" step="0.5" value={topValue * 100} onChange={(e) => updateTrim(page, 'topExtra', e.target.value)} /><span>{(topValue * 100).toFixed(1)}%</span></label>
+                <label>extra bottom <input type="range" min="0" max="12" step="0.5" value={bottomValue * 100} onChange={(e) => updateTrim(page, 'bottomExtra', e.target.value)} /><span>{(bottomValue * 100).toFixed(1)}%</span></label>
+                {hasOverride && <button className="ghost compact" onClick={() => resetPageTrim(page)}>Use all-pages trim</button>}
+              </div>;
+            })}
+          </div>
+        )}
       </div>
 
       <div className="preview-grid">
@@ -1184,8 +1225,13 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
     }, null);
     if (nearestPart && nearestPart.distance < 0.018) fraction = nearestPart.fraction;
     const previous = index > 0 ? breaks[index - 1] : 0;
-    const next = index < breaks.length - 1 ? breaks[index + 1] : 1;
-    fraction = clamp(fraction, previous + 0.025, next - 0.025);
+    const isLastBreak = index === breaks.length - 1;
+    const next = isLastBreak ? 1 : breaks[index + 1];
+    if (isLastBreak && fraction >= 0.985) {
+      onBreaksChange(breaks.slice(0, -1));
+      return;
+    }
+    fraction = clamp(fraction, previous + 0.025, isLastBreak ? 0.984 : next - 0.025);
     const nextBreaks = [...breaks];
     nextBreaks[index] = round4(fraction);
     onBreaksChange(nextBreaks.sort((a, b) => a - b));
