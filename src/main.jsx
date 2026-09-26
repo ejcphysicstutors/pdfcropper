@@ -919,9 +919,12 @@ function App() {
                         <label>Selected segment
                           <input value={segment.label} disabled={segment.isPart === false} onChange={(e) => updateSegmentLabel(segment.id, e.target.value)} />
                         </label>
+                        <div className="segment-role-toggle" role="group" aria-label="Segment role">
+                          <button type="button" className={segment.isPart !== false ? 'primary' : 'ghost'} onClick={() => updateSegmentPartFlag(segment.id, true)}>Question part</button>
+                          <button type="button" className={segment.isPart === false ? 'not-part-active' : 'ghost'} onClick={() => updateSegmentPartFlag(segment.id, false)}>Not a part</button>
+                        </div>
                         {segment.isPart !== false && <p className={`label-evidence ${segment.detectedMarker ? 'detected' : 'uncertain'}`}>{segment.labelEditedByUser ? 'Manual label' : segment.labelEvidence}</p>}
-                        <label className="check-row segment-part-toggle"><input type="checkbox" checked={segment.isPart !== false} onChange={(e) => updateSegmentPartFlag(segment.id, e.target.checked)} />Treat this region as a question part</label>
-                        {segment.isPart === false && <p className="small">The content remains inside the whole-question crop, but this final region will not be tagged or exported as a question part.</p>}
+                        {segment.isPart === false && <p className="small compact-segment-note">Kept inside the whole-question crop, but excluded from part tagging/export.</p>}
                       </div>
                     ))}
                     {selectedSegmentId && segmentLabelOverrides[selectedSegmentId] && <button type="button" className="ghost full" onClick={() => { setSegmentLabelOverrides((current) => { const next = { ...current }; delete next[selectedSegmentId]; return next; }); setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]); }}>Use automatic label</button>}
@@ -933,11 +936,11 @@ function App() {
                 {!!regions.length && !segmentationApproved && <button className="primary full" onClick={approveSegmentation}>✓ Approve questions & parts</button>}
                 {!!regions.length && segmentationApproved && <button className="approval-confirmed full" type="button" disabled>✓ Questions & parts approved</button>}
                 {!!regions.length && liveApprovalIssues.length > 0 && (
-                  <div className="approval-issues" role="alert">
-                    <strong>{liveApprovalIssues.length} issue{liveApprovalIssues.length === 1 ? '' : 's'} to fix before approval</strong>
+                  <details className="approval-issues compact-approval-issues">
+                    <summary>{liveApprovalIssues.length} issue{liveApprovalIssues.length === 1 ? '' : 's'} to fix before approval</summary>
                     <ul>{liveApprovalIssues.slice(0, 5).map((issue, index) => <li key={`${issue.message}-${index}`}>{issue.message}</li>)}</ul>
                     {liveApprovalIssues.length > 5 && <small>+ {liveApprovalIssues.length - 5} more</small>}
-                  </div>
+                  </details>
                 )}
                 <button className={`${segmentationApproved ? 'primary' : 'ghost'} full`} onClick={enterPreview} disabled={!regions.length || !segmentationApproved}>Review page layout →</button>
               </section>

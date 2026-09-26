@@ -373,3 +373,19 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
 @media (max-width: 1250px) {
   .preview-title-row > p { display: none; }
 }
+
+/* Keep the selected-segment action visible without sidebar scrolling. */
+.selected-segment-editor { padding-top: 4px; }
+.segment-role-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 7px; }
+.segment-role-toggle button { min-height: 34px; padding: 7px 8px; border-radius: 8px; font-size: .72rem; font-weight: 800; }
+.segment-role-toggle .not-part-active { border: 1px solid #667085; background: #667085; color: #fff; }
+.compact-segment-note { margin: 6px 0 0; line-height: 1.25; }
+
+/* Keep validation visible, but do not let the yellow issue box consume the sidebar. */
+.compact-approval-issues { padding: 0; overflow: hidden; }
+.compact-approval-issues summary { cursor: pointer; list-style: none; padding: 8px 10px; font-weight: 800; color: #7d5314; }
+.compact-approval-issues summary::-webkit-details-marker { display: none; }
+.compact-approval-issues summary::after { content: 'Show'; float: right; font-size: .62rem; color: #9a6c26; }
+.compact-approval-issues[open] summary::after { content: 'Hide'; }
+.compact-approval-issues ul { margin: 0; padding: 0 22px 8px 26px; }
+.compact-approval-issues small { padding: 0 10px 8px; }
