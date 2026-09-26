@@ -115,6 +115,45 @@ function parseLeadingPartMarker(text) {
   return null;
 }
 
+
+
+function parseCompactSolutionMarker(text) {
+  const cleaned = normalizePrintedMarkerText(text);
+  if (!cleaned) return null;
+
+  // Many mark schemes print compact codes such as 1ai, 1aii, 6biii or
+  // slightly spaced variants such as "1 a ii". Treat these as authoritative
+  // solution-part markers rather than trying to read them as question prose.
+  const compact = cleaned.match(/^(?:Q\s*)?(\d{1,2})\s*([a-h])\s*([ivxlcdm]+)?(?=\s|[.)\]:;,\-]|$)/i);
+  if (!compact) return null;
+
+  const questionNumber = Number(compact[1]);
+  const alpha = compact[2].toLowerCase();
+  const roman = compact[3] ? compact[3].toLowerCase() : null;
+  return {
+    questionNumber,
+    alpha,
+    roman,
+    raw: roman ? `Q${questionNumber}(${alpha})(${roman})` : `Q${questionNumber}(${alpha})`,
+    printedText: cleaned,
+    source: 'compact-solution-code',
+  };
+}
+
+function authoritativeQuestionSegments(question) {
+  const segments = (question?.segments || []).filter((segment) => segment.isPart !== false);
+  return segments.filter((segment) => {
+    const label = String(segment.label || '').trim();
+    // A label such as "Q1 part 4" means the question cropper never found a
+    // printed marker and the teacher did not correct it. Do not let that
+    // unresolved placeholder become an authoritative expected solution part.
+    const unresolvedPlaceholder = /^Q\d+\s+part\s+\d+$/i.test(label)
+      && !segment.detectedMarker
+      && !segment.labelEditedByUser;
+    return !unresolvedPlaceholder;
+  });
+}
+
 function App() {
   const [file, setFile] = useState(null);
   const [pdf, setPdf] = useState(null);
@@ -436,13 +475,19 @@ function App() {
       const bottom = 1 - footerPct / 100;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom || row.xNorm > 0.30) continue;
-        const marker = parseLeadingPartMarker(row.text);
+        const marker = workflowKind === 'solutions'
+          ? (parseCompactSolutionMarker(row.text) || parseLeadingPartMarker(row.text))
+          : parseLeadingPartMarker(row.text);
         if (!marker) continue;
         parts.push({
           page: pageData.pageNumber,
           y: round4(Math.max(top + 0.004, row.yNorm - 0.009)),
           raw: marker.raw,
           printedText: marker.printedText,
+          questionNumber: marker.questionNumber ?? null,
+          alpha: marker.alpha ?? null,
+          roman: marker.roman ?? null,
+          markerSource: marker.source || 'printed',
         });
       }
     }
@@ -498,8 +543,26 @@ function App() {
       candidates.push({ id: makeId(START), page: start.page, y: start.y, kind: START, label: authoritativeLabel, manualLabel: false, source: 'suggested', questionIndex: index });
       candidates.push({ id: makeId(END), page: end.page, y: safeY(end.y), kind: END, label: '', manualLabel: false, source: 'suggested', questionIndex: index });
 
-      const questionPartStarts = rawParts.filter((part) => within(part, start, end) && Math.abs(posKey(part) - posKey(start)) > 180);
-      questionPartStarts.slice(1).forEach((part) => {
+      const questionPartStarts = rawParts.filter((part) => {
+        if (!within(part, start, end) || Math.abs(posKey(part) - posKey(start)) <= 180) return false;
+        if (workflowKind === 'solutions' && Number.isInteger(part.questionNumber)) {
+          return part.questionNumber === start.number;
+        }
+        return true;
+      });
+
+      // In solution mode compact scheme codes such as 1ai, 1aii and 1b are
+      // themselves the part starts. The first one belongs at the parent START;
+      // every later one therefore becomes a blue PART boundary. For ordinary
+      // question papers retain the previous behaviour.
+      const partBoundaryCandidates = workflowKind === 'solutions'
+        // The parent START already sits on the first compact code (for example
+        // 1ai), and the near-start filter above removes that same marker. Every
+        // remaining compact marker is therefore a genuine next solution part.
+        ? questionPartStarts
+        : questionPartStarts.slice(1);
+
+      partBoundaryCandidates.forEach((part) => {
         candidates.push({
           id: makeId(PART), page: part.page, y: part.y, kind: PART,
           label: '', manualLabel: false, source: 'suggested', questionIndex: index,
@@ -624,7 +687,11 @@ function App() {
           : { page: nextStart.page - 1, y: 1 - footerPct / 100 - 0.004 })
         : { page: pages.length || start.page, y: 1 - footerPct / 100 - 0.004 };
       const finalEnd = end || { ...fallbackEnd, id: null, kind: END, virtual: true };
-      const fallbackLabel = start.label || `Q${index + 1}`;
+      const expectedQuestion = workflowKind === 'solutions' ? questionPayload?.questions?.[index] : null;
+      const fallbackLabel = expectedQuestion?.label || start.label || `Q${index + 1}`;
+      const expectedPartLabels = workflowKind === 'solutions'
+        ? authoritativeQuestionSegments(expectedQuestion).map((segment) => segment.label).filter(Boolean)
+        : [];
       const parts = ordered.filter((line) => line.kind === PART && within(line, start, finalEnd));
       const boundaries = [start, ...parts];
 
@@ -680,6 +747,19 @@ function App() {
           inferred = `${fallbackLabel} part ${segmentIndex + 1}`;
         }
 
+        if (workflowKind === 'solutions') {
+          if (expectedPartLabels[segmentIndex]) {
+            inferred = expectedPartLabels[segmentIndex];
+            evidence = `Matched by position to ${expectedPartLabels[segmentIndex]} from the approved question JSON`;
+          } else if (!parts.length && expectedPartLabels.length === 0) {
+            inferred = fallbackLabel;
+            evidence = `Matched to ${fallbackLabel} from the approved question JSON`;
+          } else {
+            inferred = `${fallbackLabel} solution block ${segmentIndex + 1}`;
+            evidence = 'No corresponding question-part label at this position; check the solution boundaries';
+          }
+        }
+
         const override = segmentLabelOverrides[boundary.id];
         const isPart = segmentPartFlags[boundary.id] !== false;
         return {
@@ -696,7 +776,7 @@ function App() {
       });
       return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end), label: fallbackLabel, parts, segments };
     });
-  }, [lines, footerPct, pages, segmentLabelOverrides, segmentPartFlags]);
+  }, [lines, footerPct, pages, segmentLabelOverrides, segmentPartFlags, workflowKind, questionPayload]);
 
   useEffect(() => {
     if (!regions.length) { setSelectedQuestionId(null); return; }
@@ -859,17 +939,19 @@ function App() {
       issues.push({ type: 'paper', message: `${starts.length} question starts but ${ends.length} question ends. Check for an extra or missing START/END line.` });
     }
 
-    const parsedNumbers = starts.map((line) => {
-      const match = String(line.label || '').match(/Q?\s*(\d{1,2})/i);
-      return match ? Number(match[1]) : null;
-    });
-    if (parsedNumbers.some((number) => number == null)) {
-      issues.push({ type: 'paper', message: 'One or more question starts has no usable question number. Check the question labels.' });
-    } else if (parsedNumbers.length) {
-      const expected = parsedNumbers.map((_, index) => index + 1);
-      const same = parsedNumbers.length === expected.length && parsedNumbers.every((number, index) => number === expected[index]);
-      if (!same) {
-        issues.push({ type: 'paper', message: `Question starts are not a clean Q1–Q${starts.length} sequence (${parsedNumbers.map((n) => n ?? '?').join(', ')}). This often indicates an extra detected START line.` });
+    if (workflowKind !== 'solutions') {
+      const parsedNumbers = starts.map((line) => {
+        const match = String(line.label || '').match(/Q?\s*(\d{1,2})/i);
+        return match ? Number(match[1]) : null;
+      });
+      if (parsedNumbers.some((number) => number == null)) {
+        issues.push({ type: 'paper', message: 'One or more question starts has no usable question number. Check the question labels.' });
+      } else if (parsedNumbers.length) {
+        const expected = parsedNumbers.map((_, index) => index + 1);
+        const same = parsedNumbers.length === expected.length && parsedNumbers.every((number, index) => number === expected[index]);
+        if (!same) {
+          issues.push({ type: 'paper', message: `Question starts are not a clean Q1–Q${starts.length} sequence (${parsedNumbers.map((n) => n ?? '?').join(', ')}). This often indicates an extra detected START line.` });
+        }
       }
     }
 
@@ -897,13 +979,25 @@ function App() {
       if (owners.length > 1) issues.push({ type: 'paper', message: `A PART line on page ${part.page} appears to belong to more than one question.` });
     });
 
-    regions.forEach((region) => {
+    regions.forEach((region, regionIndex) => {
       if (!region.endExplicit) {
         issues.push({ type: 'question', regionId: region.id, message: `${region.label} is using an inferred END. Add or confirm the end line.` });
       }
-      const uncertainSegments = region.segments.filter((segment) => segment.isPart !== false && !segment.detectedMarker && !segment.labelEditedByUser && region.parts.length > 0);
-      if (uncertainSegments.length) {
-        issues.push({ type: 'question', regionId: region.id, message: `${region.label} has ${uncertainSegments.length} part boundary${uncertainSegments.length === 1 ? '' : 'ies'} without a recognised printed part label. Check for an extra PART line or label it manually.` });
+      if (workflowKind === 'solutions') {
+        const expectedSegments = authoritativeQuestionSegments(questionPayload?.questions?.[regionIndex]);
+        const actualSegments = region.segments.filter((segment) => segment.isPart !== false);
+        if (expectedSegments.length && actualSegments.length !== expectedSegments.length) {
+          issues.push({
+            type: 'question',
+            regionId: region.id,
+            message: `${region.label} has ${actualSegments.length} solution block${actualSegments.length === 1 ? '' : 's'}, but the approved question JSON expects ${expectedSegments.length} question part${expectedSegments.length === 1 ? '' : 's'}. Check for an extra or missing PART boundary.`,
+          });
+        }
+      } else {
+        const uncertainSegments = region.segments.filter((segment) => segment.isPart !== false && !segment.detectedMarker && !segment.labelEditedByUser && region.parts.length > 0);
+        if (uncertainSegments.length) {
+          issues.push({ type: 'question', regionId: region.id, message: `${region.label} has ${uncertainSegments.length} part boundar${uncertainSegments.length === 1 ? 'y' : 'ies'} without a recognised printed part label. Check for an extra PART line or label it manually.` });
+        }
       }
     });
 
@@ -1049,7 +1143,7 @@ function App() {
                 <h2>{workflowKind === 'solutions' ? 'Solution blocks' : 'Questions & parts'}</h2>
                 <button className="detect-card" onClick={suggestRegions} disabled={!pages.length || loading}>
                   <span className="detect-icon">✦</span>
-                  <span><strong>{workflowKind === 'solutions' ? 'Detect solution blocks' : 'Detect questions & parts'}</strong><small>{workflowKind === 'solutions' ? 'Find the first block for each parent question, then match in order' : 'Find starts, ends and printed subparts automatically'}</small></span>
+                  <span><strong>{workflowKind === 'solutions' ? 'Detect solution blocks' : 'Detect questions & parts'}</strong><small>{workflowKind === 'solutions' ? 'Read compact scheme labels (e.g. 1ai, 1aii, 1b) and match them to the question JSON' : 'Find starts, ends and printed subparts automatically'}</small></span>
                 </button>
                 <div className="summary-metrics">
                   <div><strong>{regions.length}</strong><span>questions</span></div>
@@ -1110,7 +1204,7 @@ function App() {
                           <input value={segment.label} disabled={segment.isPart === false} onChange={(e) => updateSegmentLabel(segment.id, e.target.value)} />
                         </label>
                         <div className="segment-role-toggle" role="group" aria-label="Segment role">
-                          <button type="button" className={segment.isPart !== false ? 'primary' : 'ghost'} onClick={() => updateSegmentPartFlag(segment.id, true)}>Question part</button>
+                          <button type="button" className={segment.isPart !== false ? 'primary' : 'ghost'} onClick={() => updateSegmentPartFlag(segment.id, true)}>{workflowKind === 'solutions' ? 'Solution part' : 'Question part'}</button>
                           <button type="button" className={segment.isPart === false ? 'not-part-active' : 'ghost'} onClick={() => updateSegmentPartFlag(segment.id, false)}>Not a part</button>
                         </div>
                         {segment.isPart !== false && <p className={`label-evidence ${segment.detectedMarker ? 'detected' : 'uncertain'}`}>{segment.labelEditedByUser ? 'Manual label' : segment.labelEvidence}</p>}
