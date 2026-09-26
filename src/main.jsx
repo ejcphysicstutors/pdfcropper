@@ -1188,9 +1188,10 @@ function makeFinalPages(strip, breaks) {
     a4.width = 794; a4.height = 1123;
     const ctx = a4.getContext('2d');
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, a4.width, a4.height);
-    const widthScale = PAGE_CONTENT_WIDTH / strip.width;
-    const heightScale = PAGE_CONTENT_HEIGHT / sourceHeight;
-    const scale = Math.min(widthScale, heightScale);
+    // Keep a single, width-based scale for every worksheet page.
+    // Removing blank space must compact the content vertically; it must not
+    // make the remaining question smaller just to fit the page height.
+    const scale = PAGE_CONTENT_WIDTH / strip.width;
     const drawWidth = strip.width * scale;
     const drawHeight = sourceHeight * scale;
     const x = Math.round((a4.width - drawWidth) / 2);
