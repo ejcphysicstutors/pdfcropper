@@ -65,7 +65,8 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
 .page-label { position: absolute; left: -70px; top: 8px; width: 58px; text-align: right; color: #8a98aa; font-size: .72rem; font-weight: 700; }
 .page-frame { position: relative; overflow: hidden; background: #fff; box-shadow: 0 4px 18px rgba(15,23,42,.12); cursor: crosshair; user-select: none; }
 .page-frame canvas { position: absolute; left: 0; display: block; pointer-events: none; }
-.crop-guide { position: absolute; left: 0; right: 0; z-index: 3; pointer-events: none; background: rgba(100,116,139,.16); opacity: 1; }
+.crop-guide { position: absolute; left: 0; right: 0; z-index: 6; pointer-events: none; background: #e7edf3; opacity: 1; }
+/* Removed header/footer regions are true visual masks, not translucent guides. */
 .crop-guide span { position: absolute; right: 8px; padding: 2px 6px; border-radius: 5px; background: rgba(77,93,114,.76); color: #fff; font-size: 10px; }
 .top-guide { top: 0; border-bottom: 2px dashed rgba(100,116,139,.62); }.top-guide span { top: 4px; }
 .bottom-guide { bottom: 0; border-top: 2px dashed rgba(100,116,139,.62); }.bottom-guide span { bottom: 4px; }
