@@ -221,7 +221,7 @@ function App() {
       }
       nextPages.forEach((pageData) => { pageData.rows = extractTextRows(pageData); });
       setPages(nextPages);
-      setStatus(`${loadedPdf.numPages} pages loaded. Detect questions & parts, then check only the items that need attention.`);
+      setStatus(`${loadedPdf.numPages} pages loaded. Use Suggest regions, then scan the proposed starts, ends and part lines.`);
     } catch (error) {
       console.error(error);
       setStatus('Could not open this PDF. Please try another file.');
@@ -650,14 +650,6 @@ function App() {
     part: lines.filter((l) => l.kind === PART).length,
   }), [lines]);
   const explicitEndCount = regions.filter((region) => region.endExplicit).length;
-  const totalPartCount = regions.reduce((sum, region) => sum + region.segments.filter((segment) => segment.isPart !== false).length, 0);
-  const questionReviewInfo = useMemo(() => regions.map((region) => {
-    const activeParts = region.segments.filter((segment) => segment.isPart !== false);
-    const uncertainParts = activeParts.filter((segment) => !segment.detectedMarker && !segment.labelEditedByUser);
-    const needsCheck = !region.endExplicit || uncertainParts.length > 0;
-    return { id: region.id, partCount: activeParts.length, uncertainCount: uncertainParts.length, needsCheck };
-  }), [regions]);
-  const needsCheckCount = questionReviewInfo.filter((item) => item.needsCheck).length;
 
   function enterPreview() {
     if (!regions.length) return;
@@ -672,73 +664,82 @@ function App() {
         <div>
           <p className="eyebrow">Local browser tool</p>
           <h1>Prelim Cropper</h1>
-          <p className="subtitle">{viewMode === 'segment' ? 'Prepare the paper, check questions and parts, then review worksheet pages.' : 'Review how each complete question will appear on worksheet pages.'}</p>
+          <p className="subtitle">Prepare the paper, check questions and parts, then review worksheet pages.</p>
         </div>
-        <button className="primary" onClick={() => fileInputRef.current?.click()} disabled={loading}>{file ? 'Choose another PDF' : 'Choose PDF'}</button>
+        {file && <button className="primary" onClick={() => fileInputRef.current?.click()} disabled={loading}>Change PDF</button>}
         <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf" onChange={(e) => openPdf(e.target.files?.[0])} />
       </header>
 
       <main className={`workspace ${viewMode === 'preview' ? 'preview-mode-shell' : ''}`}>
         <aside className="controls-card">
-          <div className="workflow-steps" aria-label="Workflow progress">
-            <div className={`workflow-step ${file ? 'done' : 'active'}`}><span>1</span><b>Clean</b></div>
-            <div className={`workflow-step ${viewMode === 'segment' ? 'active' : 'done'}`}><span>2</span><b>Questions</b></div>
-            <div className={`workflow-step ${regions.length ? (viewMode === 'segment' ? 'active' : 'done') : ''}`}><span>3</span><b>Parts</b></div>
-            <div className={`workflow-step ${viewMode === 'preview' ? 'active' : ''}`}><span>4</span><b>Layout</b></div>
-            <div className="workflow-step"><span>5</span><b>Save</b></div>
-          </div>
+          <nav className="workflow-stepper" aria-label="Workflow">
+            <div className={`workflow-step ${file ? 'done' : 'active'}`}><span>{file ? '✓' : '1'}</span><small>Clean</small></div>
+            <div className={`workflow-step ${file && !regions.length && viewMode === 'segment' ? 'active' : regions.length ? 'done' : ''}`}><span>{regions.length ? '✓' : '2'}</span><small>Questions</small></div>
+            <div className={`workflow-step ${regions.length && viewMode === 'segment' ? 'active' : viewMode === 'preview' ? 'done' : ''}`}><span>{viewMode === 'preview' ? '✓' : '3'}</span><small>Parts</small></div>
+            <div className={`workflow-step ${viewMode === 'preview' ? 'active' : ''}`}><span>4</span><small>Layout</small></div>
+            <div className="workflow-step"><span>5</span><small>Save</small></div>
+          </nav>
+
           {viewMode === 'segment' ? (
             <>
-              <section>
-                <div className="section-kicker">PAGE PREPARATION</div><h2>Clean pages</h2>
-                <label>Header removed <strong>{headerPct}%</strong><input type="range" min="0" max="15" step="0.5" value={headerPct} onChange={(e) => setHeaderPct(Number(e.target.value))} /></label>
-                <label>Footer removed <strong>{footerPct}%</strong><input type="range" min="0" max="15" step="0.5" value={footerPct} onChange={(e) => setFooterPct(Number(e.target.value))} /></label>
-                <label className="check-row"><input type="checkbox" checked={showGuides} onChange={(e) => setShowGuides(e.target.checked)} />Show removed regions</label>
+              <section className="compact-section">
+                <div className="section-kicker">Page preparation</div>
+                <details className="compact-details">
+                  <summary>
+                    <span><strong>Clean pages</strong><small>Header {headerPct}% · Footer {footerPct}% · guides {showGuides ? 'on' : 'off'}</small></span>
+                    <span className="summary-action">Edit</span>
+                  </summary>
+                  <div className="details-body">
+                    <label>Header removed <strong>{headerPct}%</strong><input type="range" min="0" max="15" step="0.5" value={headerPct} onChange={(e) => setHeaderPct(Number(e.target.value))} /></label>
+                    <label>Footer removed <strong>{footerPct}%</strong><input type="range" min="0" max="15" step="0.5" value={footerPct} onChange={(e) => setFooterPct(Number(e.target.value))} /></label>
+                    <label className="check-row"><input type="checkbox" checked={showGuides} onChange={(e) => setShowGuides(e.target.checked)} />Show removed regions</label>
+                  </div>
+                </details>
               </section>
 
-              <section>
-                <div className="section-kicker">AUTOMATIC FIRST PASS</div><h2>Questions & parts</h2>
-                <button className="detect-button" onClick={suggestRegions} disabled={!pages.length || loading}>
+              <section className="compact-section">
+                <div className="section-kicker">Automatic first pass</div>
+                <h2>Questions & parts</h2>
+                <button className="detect-card" onClick={suggestRegions} disabled={!pages.length || loading}>
                   <span className="detect-icon">✦</span>
                   <span><strong>Detect questions & parts</strong><small>Find starts, ends and printed subparts automatically</small></span>
                 </button>
-                <div className="detect-summary">
-                  <span><strong>{regions.length}</strong> questions</span>
-                  <span><strong>{totalPartCount}</strong> parts</span>
-                  <span className={needsCheckCount ? 'needs-check' : 'all-clear'}><strong>{needsCheckCount}</strong> need checking</span>
+                <div className="summary-metrics">
+                  <div><strong>{regions.length}</strong><span>questions</span></div>
+                  <div><strong>{counts.part}</strong><span>parts</span></div>
+                  <div className="review-metric"><strong>{regions.filter((region) => !region.endExplicit).length}</strong><span>need checking</span></div>
                 </div>
-                <details className="boundary-tools">
-                  <summary>Add or adjust a boundary <span>Manual tools</span></summary>
-                  <div className="line-mode-picker" role="group" aria-label="Line type">
-                    <button className={`line-mode start-mode ${(heldLineMode || lineMode) === START ? 'active' : ''}`} onClick={() => setLineMode(START)}><span className="mode-swatch start-swatch" />Question start <kbd>S</kbd></button>
-                    <button className={`line-mode end-mode ${(heldLineMode || lineMode) === END ? 'active' : ''}`} onClick={() => setLineMode(END)}><span className="mode-swatch end-swatch" />Question end <kbd>E</kbd></button>
-                    <button className={`line-mode part-mode ${(heldLineMode || lineMode) === PART ? 'active' : ''}`} onClick={() => setLineMode(PART)}><span className="mode-swatch part-swatch" />Part <kbd>P</kbd></button>
-                  </div>
-                  <div className="shortcut-strip"><span><kbd>S</kbd> Start</span><span><kbd>E</kbd> End</span><span><kbd>P</kbd> Part</span></div>
-                  <p className="small">Click a line, then use <strong>↑ / ↓</strong> for fine adjustment. Hold <strong>Shift</strong> for a larger nudge. Drag to move; double-click to remove.</p>
-                  <div className="button-stack compact-actions">
-                    <button className="ghost" onClick={undoLastSuggestions} disabled={!lastSuggestionIds.length}>Undo detection</button>
-                    <button className="ghost clear-button" onClick={clearLines} disabled={!lines.length}>Clear all</button>
+                <details className="compact-details manual-details">
+                  <summary>
+                    <span><strong>Add or adjust a boundary</strong><small>Manual controls and keyboard shortcuts</small></span>
+                    <span className="summary-action">Manual</span>
+                  </summary>
+                  <div className="details-body">
+                    <div className="line-mode-picker" role="group" aria-label="Line type">
+                      <button className={`line-mode start-mode ${(heldLineMode || lineMode) === START ? 'active' : ''}`} onClick={() => setLineMode(START)}><span className="mode-swatch start-swatch" />Question start <kbd>S</kbd></button>
+                      <button className={`line-mode end-mode ${(heldLineMode || lineMode) === END ? 'active' : ''}`} onClick={() => setLineMode(END)}><span className="mode-swatch end-swatch" />Question end <kbd>E</kbd></button>
+                      <button className={`line-mode part-mode ${(heldLineMode || lineMode) === PART ? 'active' : ''}`} onClick={() => setLineMode(PART)}><span className="mode-swatch part-swatch" />Part <kbd>P</kbd></button>
+                    </div>
+                    <p className="small">Click a line, then use <strong>↑ / ↓</strong> for fine adjustment. Hold <strong>Shift</strong> for a larger nudge. Drag to move; double-click to remove.</p>
+                    <div className="button-stack compact-buttons">
+                      <button className="ghost" onClick={undoLastSuggestions} disabled={!lastSuggestionIds.length}>Undo detection</button>
+                      <button className="ghost clear-button" onClick={clearLines} disabled={!lines.length}>Clear all</button>
+                    </div>
                   </div>
                 </details>
-                <div className="metric-stack">
-                  <div className="metric"><span><i className="metric-dot start-dot" />Question starts</span><strong>{counts.start}</strong></div>
-                  <div className="metric"><span><i className="metric-dot end-dot" />Question ends found</span><strong>{explicitEndCount}/{regions.length || 0}</strong></div>
-                  <div className="metric"><span><i className="metric-dot part-dot" />Part markers</span><strong>{counts.part}</strong></div>
-                </div>
               </section>
 
-              <section>
-                <div className="section-kicker">PAPER CHECKLIST</div><h2>Check questions</h2>
-                {!regions.length && <p className="small">Detected questions will appear here. Select one only when you need to inspect or correct it.</p>}
-                <div className="region-list">
+              <section className="compact-section question-section">
+                <div className="section-heading-row"><div><div className="section-kicker">Check the paper</div><h2>Questions</h2></div><span className="question-count">{regions.length}</span></div>
+                {!regions.length && <p className="small">Questions will appear here after detection.</p>}
+                <div className="region-list question-list">
                   {regions.map((region) => {
-                    const review = questionReviewInfo.find((item) => item.id === region.id);
+                    const partCount = region.segments.filter((segment) => segment.isPart !== false).length;
+                    const needsCheck = !region.endExplicit || region.segments.some((segment) => segment.isPart !== false && !segment.detectedMarker && !segment.labelEditedByUser);
                     return (
                       <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}>
-                        <span className={`question-check ${review?.needsCheck ? 'warn' : 'ok'}`}>{review?.needsCheck ? '!' : '✓'}</span>
-                        <span className="region-copy"><span className="region-name">{region.label}</span><small>{review?.partCount || 0} part{review?.partCount === 1 ? '' : 's'}</small></span>
-                        <span className={`region-status ${review?.needsCheck ? 'warn' : 'ok'}`}>{review?.needsCheck ? (review.uncertainCount ? `${review.uncertainCount} label${review.uncertainCount === 1 ? '' : 's'} to check` : 'check end') : 'ready'}</span>
+                        <span className="region-main"><span className={`qa-dot ${needsCheck ? 'warn' : 'ok'}`}>{needsCheck ? '!' : '✓'}</span><span className="region-name">{region.label}</span></span>
+                        <span className={`region-status ${needsCheck ? 'warn' : 'ok'}`}>{needsCheck ? 'check' : `${partCount} part${partCount === 1 ? '' : 's'}`}</span>
                       </button>
                     );
                   })}
@@ -758,58 +759,29 @@ function App() {
                         <label>Selected segment
                           <input value={segment.label} disabled={segment.isPart === false} onChange={(e) => setSegmentLabelOverrides((current) => ({ ...current, [segment.id]: e.target.value }))} />
                         </label>
-                        {segment.isPart !== false && (
-                          <p className={`label-evidence ${segment.detectedMarker ? 'detected' : 'uncertain'}`}>
-                            {segment.labelEditedByUser ? 'Manual label' : segment.labelEvidence}
-                          </p>
-                        )}
-                        <label className="check-row segment-part-toggle">
-                          <input type="checkbox" checked={segment.isPart !== false} onChange={(e) => setSegmentPartFlags((current) => ({ ...current, [segment.id]: e.target.checked }))} />
-                          Treat this region as a question part
-                        </label>
+                        {segment.isPart !== false && <p className={`label-evidence ${segment.detectedMarker ? 'detected' : 'uncertain'}`}>{segment.labelEditedByUser ? 'Manual label' : segment.labelEvidence}</p>}
+                        <label className="check-row segment-part-toggle"><input type="checkbox" checked={segment.isPart !== false} onChange={(e) => setSegmentPartFlags((current) => ({ ...current, [segment.id]: e.target.checked }))} />Treat this region as a question part</label>
                         {segment.isPart === false && <p className="small">The content remains inside the whole-question crop, but this final region will not be tagged or exported as a question part.</p>}
                       </div>
                     ))}
-                    {selectedSegmentId && segmentLabelOverrides[selectedSegmentId] && (
-                      <button type="button" className="ghost full" onClick={() => setSegmentLabelOverrides((current) => { const next = { ...current }; delete next[selectedSegmentId]; return next; })}>Use automatic label</button>
-                    )}
+                    {selectedSegmentId && segmentLabelOverrides[selectedSegmentId] && <button type="button" className="ghost full" onClick={() => setSegmentLabelOverrides((current) => { const next = { ...current }; delete next[selectedSegmentId]; return next; })}>Use automatic label</button>}
                   </div>
                 )}
               </section>
 
-              <section>
-                <div className="section-kicker">NEXT STEP</div><h2>Review page layout</h2>
-                <button className="primary full" onClick={enterPreview} disabled={!regions.length}>Review worksheet pages →</button>
-                <p className="small">When the questions and parts look right, check how each complete question will paginate.</p>
+              <section className="compact-section review-cta-section">
+                <button className="primary full" onClick={enterPreview} disabled={!regions.length}>Review page layout →</button>
               </section>
             </>
           ) : (
             <>
-              <section>
-                <button className="ghost full" onClick={() => setViewMode('segment')}>← Back to questions</button>
-              </section>
-              <section>
-                <div className="section-kicker">LAYOUT REVIEW</div><h2>Questions</h2>
-                <div className="region-list preview-region-list">
-                  {regions.map((region) => (
-                    <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}>
-                      <span className="region-name">{region.label}</span>
-                      <span className="region-status ok">{(outputBreaks[region.id]?.length || 0) + 1} page{(outputBreaks[region.id]?.length || 0) === 0 ? '' : 's'}</span>
-                    </button>
-                  ))}
-                </div>
-              </section>
-              <section>
-                <div className="section-kicker">FINISH</div><h2>Save paper</h2>
-                <button className="primary full" onClick={exportSegmentation} disabled={!file || !regions.length}>Save segmentation JSON</button>
-                <p className="small">The JSON keeps source boundaries and publication page breaks separate, so later compilation can re-create the reviewed layout.</p>
-              </section>
+              <section className="compact-section"><button className="ghost full" onClick={() => setViewMode('segment')}>← Back to questions</button></section>
+              <section className="compact-section"><h2>Review questions</h2><div className="region-list preview-region-list">{regions.map((region) => <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}><span className="region-name">{region.label}</span><span className="region-status ok">layout</span></button>)}</div></section>
+              <section className="compact-section"><button className="primary full" onClick={exportJson}>Save segmentation JSON</button><p className="small">Saves the source boundaries plus reviewed page layout.</p></section>
             </>
           )}
-          <div className="status-box">{status}</div>
         </aside>
-
-        <section className="document-area">
+      <section className="document-area">
           {!file && (
             <div className="empty-state" onClick={() => fileInputRef.current?.click()}>
               <div className="empty-icon">PDF</div><h2>Choose a prelim paper</h2>
@@ -1180,9 +1152,9 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
   return (
     <div className="preview-review-workspace">
       <div className="preview-toolbar">
-        <div><p className="eyebrow">Worksheet page layout</p><h2>{region.label}</h2><p>Adjust page breaks only when needed. Use <strong>X</strong> or “Remove blank space” for unwanted answer space.</p></div>
+        <div><p className="eyebrow">Review output</p><h2>{region.label}</h2><p>Use <strong>X</strong> or “Exclude gap” to remove unwanted answer space. Extra header/footer trim applies to every page by default; switch to individual pages only when one page differs.</p></div>
         <div className="preview-actions">
-          <button className={`ghost ${excludeMode ? 'active-tool' : ''}`} onClick={() => setExcludeMode((value) => !value)}>Remove blank space <kbd>X</kbd></button>
+          <button className={`ghost ${excludeMode ? 'active-tool' : ''}`} onClick={() => setExcludeMode((value) => !value)}>Exclude gap <kbd>X</kbd></button>
           <button className="ghost" onClick={() => onBreaksChange(autoBreaks)}>Reset page breaks</button>
         </div>
       </div>
@@ -1220,11 +1192,11 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
 
       <div className="preview-grid">
         <div className="layout-editor-panel">
-          <div className="panel-heading"><div><h3>Full question</h3><p>{excludeMode ? 'Drag across unwanted blank space to exclude it. Double-click an excluded band to restore it.' : 'Drag purple page breaks. Blue lines show part starts.'}</p></div><span className="panel-note">{savedExclusions.length} blank-space removal{savedExclusions.length === 1 ? '' : 's'}</span></div>
+          <div className="panel-heading"><div><h3>Continuous question</h3><p>{excludeMode ? 'Drag across unwanted blank space to exclude it. Double-click an excluded band to restore it.' : 'Drag purple page breaks. Blue lines show part starts.'}</p></div><span className="panel-note">{savedExclusions.length} excluded gap{savedExclusions.length === 1 ? '' : 's'}</span></div>
           <StripBreakEditor strip={strip} breaks={savedBreaks || []} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={onExclusionsChange} excludeMode={excludeMode} />
         </div>
         <div className="final-pages-panel">
-          <div className="panel-heading"><div><h3>Worksheet pages</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div><span className="panel-note">Blank space removed</span></div>
+          <div className="panel-heading"><div><h3>Final pages</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div><span className="panel-note">Excluded gaps removed</span></div>
           <div className="final-page-list">
             {finalPages.map((src, index) => <div className="preview-page-card" key={`${region.id}-${index}`}><span>Page {index + 1}</span><img src={src} alt={`${region.label} final page ${index + 1}`} /></div>)}
           </div>
