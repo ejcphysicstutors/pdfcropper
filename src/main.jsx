@@ -1320,52 +1320,61 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
 
   return (
     <div className="preview-review-workspace">
-      <div className="preview-toolbar">
-        <div><p className="eyebrow">Review output</p><h2>{region.label}</h2><p>Use <strong>X</strong> or “Exclude gap” to remove unwanted answer space. Extra header/footer trim applies to every page by default; switch to individual pages only when one page differs.</p></div>
+      <div className="preview-toolbar compact-preview-toolbar">
+        <div className="preview-title-row">
+          <div><p className="eyebrow">Layout</p><h2>{region.label}</h2></div>
+          <p>Drag purple page breaks. Use <strong>X</strong> to remove unwanted blank space.</p>
+        </div>
         <div className="preview-actions">
-          <button className={`ghost ${excludeMode ? 'active-tool' : ''}`} onClick={() => setExcludeMode((value) => !value)}>Exclude gap <kbd>X</kbd></button>
-          <button className="ghost" onClick={() => onBreaksChange(autoBreaks)}>Reset page breaks</button>
+          <button className={`ghost compact ${excludeMode ? 'active-tool' : ''}`} onClick={() => setExcludeMode((value) => !value)}>Remove blank space <kbd>X</kbd></button>
+          <button className="ghost compact" onClick={() => onBreaksChange(autoBreaks)}>Reset breaks</button>
         </div>
       </div>
 
-      <div className="review-trim-card">
-        <div className="trim-card-heading">
-          <div><strong>{individualTrimMode ? 'Individual source-page trim' : 'Extra trim for all pages'}</strong><span>{individualTrimMode ? 'Only use this when a particular source page needs a different crop.' : 'Adjust once and the same extra trim is applied throughout the paper.'}</span></div>
-          <button className="ghost" onClick={() => setIndividualTrimMode((value) => !value)}>{individualTrimMode ? 'Use same trim for all pages' : 'Adjust pages individually'}</button>
-        </div>
-        {!individualTrimMode ? (
-          <div className="trim-page-grid">
-            <div className="trim-page-row global-trim-row">
-              <strong>All pages</strong>
-              <label>extra top <input type="range" min="0" max="12" step="0.5" value={(globalReviewTrim.topExtra || 0) * 100} onChange={(e) => updateGlobalTrim('topExtra', e.target.value)} /><span>{((globalReviewTrim.topExtra || 0) * 100).toFixed(1)}%</span></label>
-              <label>extra bottom <input type="range" min="0" max="12" step="0.5" value={(globalReviewTrim.bottomExtra || 0) * 100} onChange={(e) => updateGlobalTrim('bottomExtra', e.target.value)} /><span>{((globalReviewTrim.bottomExtra || 0) * 100).toFixed(1)}%</span></label>
+      <details className="review-trim-card compact-trim-card">
+        <summary>
+          <span><strong>Page cleanup</strong><small>Top +{((globalReviewTrim.topExtra || 0) * 100).toFixed(1)}% · Bottom +{((globalReviewTrim.bottomExtra || 0) * 100).toFixed(1)}%{individualTrimMode ? ' · individual pages' : ' · all pages'}</small></span>
+          <span className="summary-action">Edit</span>
+        </summary>
+        <div className="compact-trim-body">
+          <div className="trim-card-heading">
+            <div><strong>{individualTrimMode ? 'Individual source-page trim' : 'Extra trim for all pages'}</strong><span>{individualTrimMode ? 'Use only when one source page needs a different crop.' : 'One adjustment is applied throughout the paper.'}</span></div>
+            <button className="ghost compact" onClick={() => setIndividualTrimMode((value) => !value)}>{individualTrimMode ? 'Use same trim for all' : 'Adjust pages individually'}</button>
+          </div>
+          {!individualTrimMode ? (
+            <div className="trim-page-grid">
+              <div className="trim-page-row global-trim-row">
+                <strong>All pages</strong>
+                <label>extra top <input type="range" min="0" max="12" step="0.5" value={(globalReviewTrim.topExtra || 0) * 100} onChange={(e) => updateGlobalTrim('topExtra', e.target.value)} /><span>{((globalReviewTrim.topExtra || 0) * 100).toFixed(1)}%</span></label>
+                <label>extra bottom <input type="range" min="0" max="12" step="0.5" value={(globalReviewTrim.bottomExtra || 0) * 100} onChange={(e) => updateGlobalTrim('bottomExtra', e.target.value)} /><span>{((globalReviewTrim.bottomExtra || 0) * 100).toFixed(1)}%</span></label>
+              </div>
             </div>
-          </div>
-        ) : (
-          <div className="trim-page-grid">
-            {sourcePages.map((page) => {
-              const trim = trimOverrides[page] || {};
-              const topValue = trim.topExtra ?? globalReviewTrim.topExtra ?? 0;
-              const bottomValue = trim.bottomExtra ?? globalReviewTrim.bottomExtra ?? 0;
-              const hasOverride = Boolean(trimOverrides[page]);
-              return <div className="trim-page-row" key={page}>
-                <strong>Page {page}{hasOverride ? ' · custom' : ' · inherited'}</strong>
-                <label>extra top <input type="range" min="0" max="12" step="0.5" value={topValue * 100} onChange={(e) => updateTrim(page, 'topExtra', e.target.value)} /><span>{(topValue * 100).toFixed(1)}%</span></label>
-                <label>extra bottom <input type="range" min="0" max="12" step="0.5" value={bottomValue * 100} onChange={(e) => updateTrim(page, 'bottomExtra', e.target.value)} /><span>{(bottomValue * 100).toFixed(1)}%</span></label>
-                {hasOverride && <button className="ghost compact" onClick={() => resetPageTrim(page)}>Use all-pages trim</button>}
-              </div>;
-            })}
-          </div>
-        )}
-      </div>
+          ) : (
+            <div className="trim-page-grid">
+              {sourcePages.map((page) => {
+                const trim = trimOverrides[page] || {};
+                const topValue = trim.topExtra ?? globalReviewTrim.topExtra ?? 0;
+                const bottomValue = trim.bottomExtra ?? globalReviewTrim.bottomExtra ?? 0;
+                const hasOverride = Boolean(trimOverrides[page]);
+                return <div className="trim-page-row" key={page}>
+                  <strong>Page {page}{hasOverride ? ' · custom' : ' · inherited'}</strong>
+                  <label>extra top <input type="range" min="0" max="12" step="0.5" value={topValue * 100} onChange={(e) => updateTrim(page, 'topExtra', e.target.value)} /><span>{(topValue * 100).toFixed(1)}%</span></label>
+                  <label>extra bottom <input type="range" min="0" max="12" step="0.5" value={bottomValue * 100} onChange={(e) => updateTrim(page, 'bottomExtra', e.target.value)} /><span>{(bottomValue * 100).toFixed(1)}%</span></label>
+                  {hasOverride && <button className="ghost compact" onClick={() => resetPageTrim(page)}>Use all-pages trim</button>}
+                </div>;
+              })}
+            </div>
+          )}
+        </div>
+      </details>
 
       <div className="preview-grid">
         <div className="layout-editor-panel">
-          <div className="panel-heading"><div><h3>Continuous question</h3><p>{excludeMode ? 'Drag across unwanted blank space to exclude it. Double-click an excluded band to restore it.' : 'Drag purple page breaks. Blue lines show part starts.'}</p></div><span className="panel-note">{savedExclusions.length} excluded gap{savedExclusions.length === 1 ? '' : 's'}</span></div>
+          <div className="panel-heading compact-panel-heading"><div><h3>Full question</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} removed</span></div>
           <StripBreakEditor strip={strip} breaks={savedBreaks || []} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={onExclusionsChange} excludeMode={excludeMode} />
         </div>
         <div className="final-pages-panel">
-          <div className="panel-heading"><div><h3>Final pages</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div><span className="panel-note">Excluded gaps removed</span></div>
+          <div className="panel-heading compact-panel-heading"><div><h3>Worksheet pages</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div></div>
           <div className="final-page-list">
             {finalPages.map((src, index) => <div className="preview-page-card" key={`${region.id}-${index}`}><span>Page {index + 1}</span><img src={src} alt={`${region.label} final page ${index + 1}`} /></div>)}
           </div>
