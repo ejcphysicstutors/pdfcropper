@@ -1087,23 +1087,34 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
 }
 
 function detectedFooterCutoff(pageData, configuredBottom) {
-  // Some prelim papers place page furniture slightly above the nominal footer band.
-  // Treat obvious footer-only rows as page furniture even when a PART segment spans
-  // across them, so question ownership can never pull exam codes/page numbers back
-  // into the worksheet preview.
+  // Some prelim papers place page furniture well above the nominal footer band.
+  // Detect that furniture independently of question/part ownership and crop from
+  // the first footer row downward. This is intentionally conservative: paper codes
+  // and "Turn Over" can begin around 75-80% of the source page, while a bare page
+  // number is only treated as furniture when it is both low on the page and centred.
   const footerRows = (pageData.rows || []).filter((row) => {
     const y = Number(row.yNorm);
-    if (!Number.isFinite(y) || y < 0.84 || y >= configuredBottom) return false;
+    if (!Number.isFinite(y) || y >= configuredBottom) return false;
     const text = String(row.text || '').replace(/\s+/g, ' ').trim();
     if (!text) return false;
-    return /^\d{1,3}$/.test(text)
-      || /^(?:\[?\s*)?turn\s+over(?:\s*\]?)?$/i.test(text)
-      || /(?:^|\s)\d{4}\s*\/\s*0?\d\s*\/\s*[A-Z0-9.-]+/i.test(text)
-      || /^(?:©|copyright)\b/i.test(text);
+
+    const explicitFooterText = y >= 0.72 && (
+      /turn\s+over/i.test(text)
+      || /\b\d{4}\s*\/\s*0?\d{1,2}\s*\//i.test(text)
+      || /\b(?:ASRJC|HCI|RI|RJC|VJC|NJC|SAJC|EJC|ACJC|CJC|DHS|TJC|NYJC|YIJC|JPJC)\b/i.test(text) && /\d{4}/.test(text)
+      || /^(?:©|copyright)\b/i.test(text)
+    );
+
+    const centredPageNumber = y >= 0.80
+      && /^\d{1,3}$/.test(text)
+      && Number(row.xNorm) >= 0.35
+      && Number(row.xNorm) <= 0.65;
+
+    return explicitFooterText || centredPageNumber;
   });
   if (!footerRows.length) return configuredBottom;
   const firstFurnitureY = Math.min(...footerRows.map((row) => Number(row.yNorm)));
-  return Math.min(configuredBottom, clamp(firstFurnitureY - 0.006, 0.52, 1));
+  return Math.min(configuredBottom, clamp(firstFurnitureY - 0.008, 0.52, 1));
 }
 
 async function buildQuestionStrip(pages, region, headerPct, footerPct, globalReviewTrim = {}, trimOverrides = {}) {
@@ -1243,53 +1254,76 @@ function normalizeExclusions(ranges) {
 
 function buildCompactedStrip(strip, exclusions) {
   const normalized = normalizeExclusions(exclusions);
-  const totalRemoved = normalized.reduce((sum, range) => sum + (range.end - range.start), 0);
-  const keptFraction = Math.max(0.001, 1 - totalRemoved);
+  // Keep a small white gutter wherever a removed band joins two pieces of
+  // question content. "Remove blank space" should shorten a gap, not glue
+  // neighbouring parts together visually.
+  const joinGapPx = Math.max(12, Math.round(strip.width * 0.016));
+  const removedPx = normalized.reduce((sum, range) => {
+    const startY = Math.round(range.start * strip.height);
+    const endY = Math.round(range.end * strip.height);
+    return sum + Math.max(0, endY - startY);
+  }, 0);
+  const spacerPx = normalized.length * joinGapPx;
   const out = document.createElement('canvas');
   out.width = strip.width;
-  out.height = Math.max(1, Math.round(strip.height * keptFraction));
+  out.height = Math.max(1, strip.height - removedPx + spacerPx);
   const ctx = out.getContext('2d');
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, out.width, out.height);
 
+  const pieces = [];
   let sourceCursor = 0;
   let destY = 0;
   for (const range of normalized) {
     const startY = Math.round(range.start * strip.height);
+    const endY = Math.round(range.end * strip.height);
     if (startY > sourceCursor) {
       const h = startY - sourceCursor;
       ctx.drawImage(strip, 0, sourceCursor, strip.width, h, 0, destY, strip.width, h);
+      pieces.push({ type: 'kept', sourceStart: sourceCursor, sourceEnd: startY, destStart: destY, destEnd: destY + h });
       destY += h;
     }
-    sourceCursor = Math.max(sourceCursor, Math.round(range.end * strip.height));
+    pieces.push({ type: 'removed', sourceStart: startY, sourceEnd: endY, destStart: destY, destEnd: destY + joinGapPx });
+    // Canvas is already white, so advancing destY leaves a clean gutter.
+    destY += joinGapPx;
+    sourceCursor = Math.max(sourceCursor, endY);
   }
   if (sourceCursor < strip.height) {
     const h = strip.height - sourceCursor;
     ctx.drawImage(strip, 0, sourceCursor, strip.width, h, 0, destY, strip.width, h);
+    pieces.push({ type: 'kept', sourceStart: sourceCursor, sourceEnd: strip.height, destStart: destY, destEnd: destY + h });
   }
 
   function originalToCompacted(fraction) {
-    let removedBefore = 0;
-    for (const range of normalized) {
-      if (fraction >= range.end) removedBefore += range.end - range.start;
-      else if (fraction > range.start) removedBefore += fraction - range.start;
+    const sourceY = clamp(fraction, 0, 1) * strip.height;
+    for (const piece of pieces) {
+      if (sourceY <= piece.sourceEnd) {
+        if (piece.type === 'removed') {
+          const span = Math.max(1, piece.sourceEnd - piece.sourceStart);
+          const t = clamp((sourceY - piece.sourceStart) / span, 0, 1);
+          return clamp((piece.destStart + t * (piece.destEnd - piece.destStart)) / out.height, 0, 1);
+        }
+        return clamp((piece.destStart + (sourceY - piece.sourceStart)) / out.height, 0, 1);
+      }
     }
-    return clamp((fraction - removedBefore) / keptFraction, 0, 1);
+    return 1;
   }
 
   function compactedToOriginal(fraction) {
-    const targetKept = clamp(fraction, 0, 1) * keptFraction;
-    let keptSeen = 0;
-    let cursor = 0;
-    for (const range of normalized) {
-      const keptSpan = range.start - cursor;
-      if (targetKept <= keptSeen + keptSpan) return clamp(cursor + (targetKept - keptSeen), 0, 1);
-      keptSeen += keptSpan;
-      cursor = range.end;
+    const dest = clamp(fraction, 0, 1) * out.height;
+    for (const piece of pieces) {
+      if (dest <= piece.destEnd) {
+        if (piece.type === 'removed') {
+          const span = Math.max(1, piece.destEnd - piece.destStart);
+          const t = clamp((dest - piece.destStart) / span, 0, 1);
+          return clamp((piece.sourceStart + t * (piece.sourceEnd - piece.sourceStart)) / strip.height, 0, 1);
+        }
+        return clamp((piece.sourceStart + (dest - piece.destStart)) / strip.height, 0, 1);
+      }
     }
-    return clamp(cursor + (targetKept - keptSeen), 0, 1);
+    return 1;
   }
 
-  return { canvas: out, exclusions: normalized, originalToCompacted, compactedToOriginal };
+  return { canvas: out, exclusions: normalized, originalToCompacted, compactedToOriginal, joinGapPx };
 }
 
 function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, globalReviewTrim, onGlobalReviewTrimChange, trimOverrides, onTrimOverridesChange }) {
@@ -1331,7 +1365,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
       setLoading(false);
     }).catch((error) => { console.error(error); if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [pages, region?.id, region?.start.page, region?.start.y, region?.end.page, region?.end.y, headerPct, footerPct, globalReviewTrim.topExtra, globalReviewTrim.bottomExtra, JSON.stringify(trimOverrides)]);
+  }, [pages, region?.id, region?.start.page, region?.start.y, region?.end.page, region?.end.y, headerPct, footerPct, globalReviewTrim.topExtra, globalReviewTrim.bottomExtra, JSON.stringify(trimOverrides), JSON.stringify(savedExclusions)]);
 
   if (!region) return <div className="preview-empty large">Select a question to review.</div>;
   if (loading || !strip) return <div className="loading-card">Building cleaned question preview…</div>;
@@ -1362,6 +1396,27 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
     const next = { ...trimOverrides };
     delete next[page];
     onTrimOverridesChange(next);
+  }
+
+  function handleExclusionsChange(nextExclusions) {
+    if (!strip) {
+      onExclusionsChange(nextExclusions);
+      return;
+    }
+
+    // Keep each worksheet page ending at the same physical A4 position when
+    // blank space is removed/restored. Breaks are stored in original-strip
+    // coordinates, so remap them through the old and new compacted strips.
+    const oldCompacted = buildCompactedStrip(strip.canvas, savedExclusions);
+    const newCompacted = buildCompactedStrip(strip.canvas, nextExclusions);
+    const shiftedBreaks = (savedBreaks || []).map((fraction) => {
+      const oldDestY = oldCompacted.originalToCompacted(fraction) * oldCompacted.canvas.height;
+      const newCompactedFraction = clamp(oldDestY / Math.max(1, newCompacted.canvas.height), 0, 1);
+      return round4(newCompacted.compactedToOriginal(newCompactedFraction));
+    }).sort((a, b) => a - b);
+
+    onExclusionsChange(nextExclusions);
+    if (shiftedBreaks.length) onBreaksChange(shiftedBreaks);
   }
 
   return (
@@ -1417,7 +1472,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
       <div className="preview-grid">
         <div className="layout-editor-panel">
           <div className="panel-heading compact-panel-heading"><div><h3>Full question</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} removed</span></div>
-          <StripBreakEditor strip={strip} breaks={savedBreaks || []} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={onExclusionsChange} excludeMode={excludeMode} />
+          <StripBreakEditor strip={strip} breaks={savedBreaks || []} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} />
         </div>
         <div className="final-pages-panel">
           <div className="panel-heading compact-panel-heading"><div><h3>Worksheet pages</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div></div>
@@ -1452,11 +1507,12 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
     const previous = index > 0 ? breaks[index - 1] : 0;
     const isLastBreak = index === breaks.length - 1;
     const next = isLastBreak ? 1 : breaks[index + 1];
-    if (isLastBreak && fraction >= 0.985) {
-      onBreaksChange(breaks.slice(0, -1));
-      return;
-    }
-    fraction = clamp(fraction, previous + 0.025, isLastBreak ? 0.984 : next - 0.025);
+    // Never delete a page break merely because it is dragged close to the
+    // end of the strip. Accidental break deletion makes the final worksheet
+    // page disappear and leaves no obvious recovery path. Keep a small
+    // minimum tail after the last break instead.
+    const maxFraction = isLastBreak ? 0.97 : next - 0.025;
+    fraction = clamp(fraction, previous + 0.025, maxFraction);
     const nextBreaks = [...breaks];
     nextBreaks[index] = round4(fraction);
     onBreaksChange(nextBreaks.sort((a, b) => a - b));
