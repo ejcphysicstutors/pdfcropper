@@ -987,10 +987,15 @@ function App() {
         const expectedSegments = authoritativeQuestionSegments(questionPayload?.questions?.[regionIndex]);
         const actualSegments = region.segments.filter((segment) => segment.isPart !== false);
         if (expectedSegments.length && actualSegments.length !== expectedSegments.length) {
+          const expectedLabels = expectedSegments.map((segment, segmentIndex) => {
+            const label = String(segment.label || '').trim();
+            return label || `${region.label} part ${segmentIndex + 1}`;
+          });
           issues.push({
             type: 'question',
             regionId: region.id,
             message: `${region.label} has ${actualSegments.length} solution block${actualSegments.length === 1 ? '' : 's'}, but the approved question JSON expects ${expectedSegments.length} question part${expectedSegments.length === 1 ? '' : 's'}. Check for an extra or missing PART boundary.`,
+            expectedLabels,
           });
         }
       } else {
@@ -1222,7 +1227,16 @@ function App() {
                 {!!regions.length && liveApprovalIssues.length > 0 && (
                   <details className="approval-issues compact-approval-issues">
                     <summary>{liveApprovalIssues.length} issue{liveApprovalIssues.length === 1 ? '' : 's'} to fix before approval</summary>
-                    <ul>{liveApprovalIssues.slice(0, 5).map((issue, index) => <li key={`${issue.message}-${index}`}>{issue.message}</li>)}</ul>
+                    <ul>{liveApprovalIssues.slice(0, 5).map((issue, index) => (
+                      <li key={`${issue.message}-${index}`}>
+                        <span>{issue.message}</span>
+                        {!!issue.expectedLabels?.length && (
+                          <small style={{ display: 'block', marginTop: 4 }}>
+                            Expected parts: {issue.expectedLabels.join(' · ')}
+                          </small>
+                        )}
+                      </li>
+                    ))}</ul>
                     {liveApprovalIssues.length > 5 && <small>+ {liveApprovalIssues.length - 5} more</small>}
                   </details>
                 )}
