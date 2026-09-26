@@ -1099,17 +1099,38 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     const trim = trimOverrides[pageData.pageNumber] || {};
     const topExtra = trim.topExtra ?? globalReviewTrim.topExtra ?? 0;
     const bottomExtra = trim.bottomExtra ?? globalReviewTrim.bottomExtra ?? 0;
-    let top = headerPct / 100 + topExtra;
-    let bottom = 1 - footerPct / 100 - bottomExtra;
+
+    // Apply the same base header/footer cleanup used in the rolling-paper editor
+    // before any question-specific or review-only trimming. Keeping this as a
+    // distinct first crop prevents raw page furniture from reappearing in the
+    // layout preview on continuation pages.
+    const cleanTop = clamp((Number(headerPct) || 0) / 100 + topExtra, 0, 0.48);
+    const cleanBottom = clamp(1 - (Number(footerPct) || 0) / 100 - bottomExtra, 0.52, 1);
+    if (cleanBottom <= cleanTop) continue;
+
+    const cleanSy = Math.floor(canvas.height * cleanTop);
+    const cleanEy = Math.ceil(canvas.height * cleanBottom);
+    const cleanHeight = Math.max(1, cleanEy - cleanSy);
+    const cleanedPage = document.createElement('canvas');
+    cleanedPage.width = canvas.width;
+    cleanedPage.height = cleanHeight;
+    cleanedPage.getContext('2d').drawImage(canvas, 0, cleanSy, canvas.width, cleanHeight, 0, 0, canvas.width, cleanHeight);
+
+    let top = cleanTop;
+    let bottom = cleanBottom;
     if (pageData.pageNumber === region.start.page) top = Math.max(top, region.start.y);
     if (pageData.pageNumber === region.end.page) bottom = Math.min(bottom, region.end.y);
     if (bottom <= top) continue;
 
-    const sy = Math.round(canvas.height * top);
-    const sh = Math.max(1, Math.round(canvas.height * (bottom - top)));
+    const cleanSpan = cleanBottom - cleanTop;
+    const localTop = clamp((top - cleanTop) / cleanSpan, 0, 1);
+    const localBottom = clamp((bottom - cleanTop) / cleanSpan, 0, 1);
+    const sy = Math.floor(cleanedPage.height * localTop);
+    const ey = Math.ceil(cleanedPage.height * localBottom);
+    const sh = Math.max(1, ey - sy);
     const frag = document.createElement('canvas');
-    frag.width = canvas.width; frag.height = sh;
-    frag.getContext('2d').drawImage(canvas, 0, sy, canvas.width, sh, 0, 0, canvas.width, sh);
+    frag.width = cleanedPage.width; frag.height = sh;
+    frag.getContext('2d').drawImage(cleanedPage, 0, sy, cleanedPage.width, sh, 0, 0, cleanedPage.width, sh);
     fragments.push(frag);
     pageMaps.push({ page: pageData.pageNumber, top, bottom, startY: cumulativeHeight, height: sh, fullHeight: canvas.height });
     cumulativeHeight += sh;
@@ -1333,7 +1354,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
 
       <details className="review-trim-card compact-trim-card">
         <summary>
-          <span><strong>Page cleanup</strong><small>Top +{((globalReviewTrim.topExtra || 0) * 100).toFixed(1)}% · Bottom +{((globalReviewTrim.bottomExtra || 0) * 100).toFixed(1)}%{individualTrimMode ? ' · individual pages' : ' · all pages'}</small></span>
+          <span><strong>Page cleanup</strong><small>Header {headerPct}% · Footer {footerPct}% applied · extra top +{((globalReviewTrim.topExtra || 0) * 100).toFixed(1)}% · bottom +{((globalReviewTrim.bottomExtra || 0) * 100).toFixed(1)}%{individualTrimMode ? ' · individual pages' : ' · all pages'}</small></span>
           <span className="summary-action">Edit</span>
         </summary>
         <div className="compact-trim-body">
