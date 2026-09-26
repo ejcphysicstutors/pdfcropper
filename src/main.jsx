@@ -885,7 +885,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
       <div className="page-label">Page {pageData.pageNumber}</div>
       <div ref={frameRef} className="page-frame" style={{ width: renderSize.width, height: frameHeight }} onClick={(e) => { if (!e.target.closest('.crop-line')) onAddLine(pageData.pageNumber, eventToYNorm(e), lineMode); }}>
         <canvas ref={canvasRef} style={{ top: canvasTop }} />
-        {showGuides && <><div className="crop-guide top-guide"><span>header removed</span></div><div className="crop-guide bottom-guide"><span>footer removed</span></div></>}
+        {showGuides && <><div className="crop-guide top-guide" style={{ height: `${headerPct}%` }}><span>header removed</span></div><div className="crop-guide bottom-guide" style={{ height: `${footerPct}%` }}><span>footer removed</span></div></>}
         {regions.flatMap((region) => (region.segments || []).map((segment) => ({ region, segment }))).filter(({ segment }) => segment.start.page <= pageData.pageNumber && segment.end.page >= pageData.pageNumber).map(({ region, segment }) => {
           const topNorm = segment.start.page === pageData.pageNumber ? Math.max(segment.start.y, visibleTop) : visibleTop;
           const bottomNorm = segment.end.page === pageData.pageNumber ? Math.min(segment.end.y, visibleBottom) : visibleBottom;
