@@ -311,3 +311,18 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
   .needs-fix-button { grid-column: 1 / -1; grid-row: 2; }
   .approve-button { grid-column: 2; grid-row: 1; }
 }
+
+/* Whole-paper approval gate */
+.summary-metrics .review-metric.has-issues { background: #fff8ec; border-color: #efd8ad; }
+.summary-metrics .review-metric.has-issues strong,
+.summary-metrics .review-metric.has-issues span { color: #8a5a13; }
+.summary-metrics .review-metric.clear { background: #f6faf7; border-color: #d6e7da; }
+.question-count.warn { background: #fff3df; color: #986019; }
+.review-progress-copy.approval-ok { color: #3d6b4d; font-weight: 800; }
+.approval-confirmed { width: 100%; padding: 9px 10px; border: 1px solid #cde2d2; border-radius: 9px; background: #edf8ef; color: #356645; font-weight: 800; cursor: default; opacity: 1; }
+.approval-confirmed:disabled { opacity: 1; }
+.approval-issues { margin: 7px 0; padding: 9px 10px; border: 1px solid #ecd4a8; border-radius: 9px; background: #fff9ed; color: #6f4d18; font-size: .66rem; line-height: 1.35; }
+.approval-issues strong { display: block; margin-bottom: 4px; color: #7d5314; }
+.approval-issues ul { margin: 0; padding-left: 16px; }
+.approval-issues li + li { margin-top: 3px; }
+.approval-issues small { display: block; margin-top: 4px; color: #8a6b3b; }
