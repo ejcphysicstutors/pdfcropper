@@ -115,6 +115,45 @@ function parseLeadingPartMarker(text) {
   return null;
 }
 
+
+
+function parseCompactSolutionMarker(text) {
+  const cleaned = normalizePrintedMarkerText(text);
+  if (!cleaned) return null;
+
+  // Many mark schemes print compact codes such as 1ai, 1aii, 6biii or
+  // slightly spaced variants such as "1 a ii". Treat these as authoritative
+  // solution-part markers rather than trying to read them as question prose.
+  const compact = cleaned.match(/^(?:Q\s*)?(\d{1,2})\s*([a-h])\s*([ivxlcdm]+)?(?=\s|[.)\]:;,\-]|$)/i);
+  if (!compact) return null;
+
+  const questionNumber = Number(compact[1]);
+  const alpha = compact[2].toLowerCase();
+  const roman = compact[3] ? compact[3].toLowerCase() : null;
+  return {
+    questionNumber,
+    alpha,
+    roman,
+    raw: roman ? `Q${questionNumber}(${alpha})(${roman})` : `Q${questionNumber}(${alpha})`,
+    printedText: cleaned,
+    source: 'compact-solution-code',
+  };
+}
+
+function authoritativeQuestionSegments(question) {
+  const segments = (question?.segments || []).filter((segment) => segment.isPart !== false);
+  return segments.filter((segment) => {
+    const label = String(segment.label || '').trim();
+    // A label such as "Q1 part 4" means the question cropper never found a
+    // printed marker and the teacher did not correct it. Do not let that
+    // unresolved placeholder become an authoritative expected solution part.
+    const unresolvedPlaceholder = /^Q\d+\s+part\s+\d+$/i.test(label)
+      && !segment.detectedMarker
+      && !segment.labelEditedByUser;
+    return !unresolvedPlaceholder;
+  });
+}
+
 function App() {
   const [file, setFile] = useState(null);
   const [pdf, setPdf] = useState(null);
@@ -436,13 +475,19 @@ function App() {
       const bottom = 1 - footerPct / 100;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom || row.xNorm > 0.30) continue;
-        const marker = parseLeadingPartMarker(row.text);
+        const marker = workflowKind === 'solutions'
+          ? (parseCompactSolutionMarker(row.text) || parseLeadingPartMarker(row.text))
+          : parseLeadingPartMarker(row.text);
         if (!marker) continue;
         parts.push({
           page: pageData.pageNumber,
           y: round4(Math.max(top + 0.004, row.yNorm - 0.009)),
           raw: marker.raw,
           printedText: marker.printedText,
+          questionNumber: marker.questionNumber ?? null,
+          alpha: marker.alpha ?? null,
+          roman: marker.roman ?? null,
+          markerSource: marker.source || 'printed',
         });
       }
     }
@@ -498,8 +543,26 @@ function App() {
       candidates.push({ id: makeId(START), page: start.page, y: start.y, kind: START, label: authoritativeLabel, manualLabel: false, source: 'suggested', questionIndex: index });
       candidates.push({ id: makeId(END), page: end.page, y: safeY(end.y), kind: END, label: '', manualLabel: false, source: 'suggested', questionIndex: index });
 
-      const questionPartStarts = rawParts.filter((part) => within(part, start, end) && Math.abs(posKey(part) - posKey(start)) > 180);
-      questionPartStarts.slice(1).forEach((part) => {
+      const questionPartStarts = rawParts.filter((part) => {
+        if (!within(part, start, end) || Math.abs(posKey(part) - posKey(start)) <= 180) return false;
+        if (workflowKind === 'solutions' && Number.isInteger(part.questionNumber)) {
+          return part.questionNumber === start.number;
+        }
+        return true;
+      });
+
+      // In solution mode compact scheme codes such as 1ai, 1aii and 1b are
+      // themselves the part starts. The first one belongs at the parent START;
+      // every later one therefore becomes a blue PART boundary. For ordinary
+      // question papers retain the previous behaviour.
+      const partBoundaryCandidates = workflowKind === 'solutions'
+        // The parent START already sits on the first compact code (for example
+        // 1ai), and the near-start filter above removes that same marker. Every
+        // remaining compact marker is therefore a genuine next solution part.
+        ? questionPartStarts
+        : questionPartStarts.slice(1);
+
+      partBoundaryCandidates.forEach((part) => {
         candidates.push({
           id: makeId(PART), page: part.page, y: part.y, kind: PART,
           label: '', manualLabel: false, source: 'suggested', questionIndex: index,
@@ -627,7 +690,7 @@ function App() {
       const expectedQuestion = workflowKind === 'solutions' ? questionPayload?.questions?.[index] : null;
       const fallbackLabel = expectedQuestion?.label || start.label || `Q${index + 1}`;
       const expectedPartLabels = workflowKind === 'solutions'
-        ? (expectedQuestion?.segments || []).filter((segment) => segment.isPart !== false).map((segment) => segment.label).filter(Boolean)
+        ? authoritativeQuestionSegments(expectedQuestion).map((segment) => segment.label).filter(Boolean)
         : [];
       const parts = ordered.filter((line) => line.kind === PART && within(line, start, finalEnd));
       const boundaries = [start, ...parts];
@@ -921,13 +984,18 @@ function App() {
         issues.push({ type: 'question', regionId: region.id, message: `${region.label} is using an inferred END. Add or confirm the end line.` });
       }
       if (workflowKind === 'solutions') {
-        const expectedSegments = (questionPayload?.questions?.[regionIndex]?.segments || []).filter((segment) => segment.isPart !== false);
+        const expectedSegments = authoritativeQuestionSegments(questionPayload?.questions?.[regionIndex]);
         const actualSegments = region.segments.filter((segment) => segment.isPart !== false);
         if (expectedSegments.length && actualSegments.length !== expectedSegments.length) {
+          const expectedLabels = expectedSegments.map((segment, segmentIndex) => {
+            const label = String(segment.label || '').trim();
+            return label || `${region.label} part ${segmentIndex + 1}`;
+          });
           issues.push({
             type: 'question',
             regionId: region.id,
             message: `${region.label} has ${actualSegments.length} solution block${actualSegments.length === 1 ? '' : 's'}, but the approved question JSON expects ${expectedSegments.length} question part${expectedSegments.length === 1 ? '' : 's'}. Check for an extra or missing PART boundary.`,
+            expectedLabels,
           });
         }
       } else {
@@ -1080,7 +1148,7 @@ function App() {
                 <h2>{workflowKind === 'solutions' ? 'Solution blocks' : 'Questions & parts'}</h2>
                 <button className="detect-card" onClick={suggestRegions} disabled={!pages.length || loading}>
                   <span className="detect-icon">✦</span>
-                  <span><strong>{workflowKind === 'solutions' ? 'Detect solution blocks' : 'Detect questions & parts'}</strong><small>{workflowKind === 'solutions' ? 'Find the first block for each parent question, then match in order' : 'Find starts, ends and printed subparts automatically'}</small></span>
+                  <span><strong>{workflowKind === 'solutions' ? 'Detect solution blocks' : 'Detect questions & parts'}</strong><small>{workflowKind === 'solutions' ? 'Read compact scheme labels (e.g. 1ai, 1aii, 1b) and match them to the question JSON' : 'Find starts, ends and printed subparts automatically'}</small></span>
                 </button>
                 <div className="summary-metrics">
                   <div><strong>{regions.length}</strong><span>questions</span></div>
@@ -1159,7 +1227,16 @@ function App() {
                 {!!regions.length && liveApprovalIssues.length > 0 && (
                   <details className="approval-issues compact-approval-issues">
                     <summary>{liveApprovalIssues.length} issue{liveApprovalIssues.length === 1 ? '' : 's'} to fix before approval</summary>
-                    <ul>{liveApprovalIssues.slice(0, 5).map((issue, index) => <li key={`${issue.message}-${index}`}>{issue.message}</li>)}</ul>
+                    <ul>{liveApprovalIssues.slice(0, 5).map((issue, index) => (
+                      <li key={`${issue.message}-${index}`}>
+                        <span>{issue.message}</span>
+                        {!!issue.expectedLabels?.length && (
+                          <small style={{ display: 'block', marginTop: 4 }}>
+                            Expected parts: {issue.expectedLabels.join(' · ')}
+                          </small>
+                        )}
+                      </li>
+                    ))}</ul>
                     {liveApprovalIssues.length > 5 && <small>+ {liveApprovalIssues.length - 5} more</small>}
                   </details>
                 )}
