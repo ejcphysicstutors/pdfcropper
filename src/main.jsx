@@ -1083,6 +1083,26 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
   );
 }
 
+function detectedFooterCutoff(pageData, configuredBottom) {
+  // Some prelim papers place page furniture slightly above the nominal footer band.
+  // Treat obvious footer-only rows as page furniture even when a PART segment spans
+  // across them, so question ownership can never pull exam codes/page numbers back
+  // into the worksheet preview.
+  const footerRows = (pageData.rows || []).filter((row) => {
+    const y = Number(row.yNorm);
+    if (!Number.isFinite(y) || y < 0.84 || y >= configuredBottom) return false;
+    const text = String(row.text || '').replace(/\s+/g, ' ').trim();
+    if (!text) return false;
+    return /^\d{1,3}$/.test(text)
+      || /^(?:\[?\s*)?turn\s+over(?:\s*\]?)?$/i.test(text)
+      || /(?:^|\s)\d{4}\s*\/\s*0?\d\s*\/\s*[A-Z0-9.-]+/i.test(text)
+      || /^(?:©|copyright)\b/i.test(text);
+  });
+  if (!footerRows.length) return configuredBottom;
+  const firstFurnitureY = Math.min(...footerRows.map((row) => Number(row.yNorm)));
+  return Math.min(configuredBottom, clamp(firstFurnitureY - 0.006, 0.52, 1));
+}
+
 async function buildQuestionStrip(pages, region, headerPct, footerPct, globalReviewTrim = {}, trimOverrides = {}) {
   const relevant = pages.filter((p) => p.pageNumber >= region.start.page && p.pageNumber <= region.end.page);
   const fragments = [];
@@ -1105,7 +1125,8 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     // distinct first crop prevents raw page furniture from reappearing in the
     // layout preview on continuation pages.
     const cleanTop = clamp((Number(headerPct) || 0) / 100 + topExtra, 0, 0.48);
-    const cleanBottom = clamp(1 - (Number(footerPct) || 0) / 100 - bottomExtra, 0.52, 1);
+    const configuredBottom = clamp(1 - (Number(footerPct) || 0) / 100 - bottomExtra, 0.52, 1);
+    const cleanBottom = detectedFooterCutoff(pageData, configuredBottom);
     if (cleanBottom <= cleanTop) continue;
 
     const cleanSy = Math.floor(canvas.height * cleanTop);
