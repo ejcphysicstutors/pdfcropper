@@ -138,6 +138,7 @@ function App() {
   const [exclusions, setExclusions] = useState({});
   const [trimOverrides, setTrimOverrides] = useState({});
   const [globalReviewTrim, setGlobalReviewTrim] = useState({ topExtra: 0, bottomExtra: 0 });
+  const [questionReviewStatus, setQuestionReviewStatus] = useState({});
   const fileInputRef = useRef(null);
 
   useEffect(() => () => { if (pdf) pdf.destroy(); }, [pdf]);
@@ -205,6 +206,7 @@ function App() {
     setOutputBreaks({});
     setExclusions({});
     setTrimOverrides({});
+    setQuestionReviewStatus({});
     setViewMode('segment');
 
     try {
@@ -238,33 +240,38 @@ function App() {
   function addLine(page, y, kind = lineMode) {
     const newLine = { id: makeId(kind), page, y: safeY(y), kind, label: '', manualLabel: false, source: 'manual' };
     setLines((current) => [...current, newLine].sort(comparePos));
+    setQuestionReviewStatus({});
     setSelectedLineId(newLine.id);
   }
 
   function moveLine(id, page, y) {
     setLines((current) => current.map((line) => line.id === id ? { ...line, page, y: safeY(y), source: 'manual' } : line).sort(comparePos));
+    setQuestionReviewStatus({});
     setLastSuggestionIds((ids) => ids.filter((item) => item !== id));
   }
 
   function removeLine(id) {
     setLines((current) => current.filter((line) => line.id !== id));
+    setQuestionReviewStatus({});
     setLastSuggestionIds((ids) => ids.filter((item) => item !== id));
     setSelectedLineId((current) => current === id ? null : current);
   }
 
   function updateLineLabel(id, label) {
     setLines((current) => current.map((line) => line.id === id ? { ...line, label, manualLabel: true, source: 'manual' } : line));
+    if (selectedQuestionId) setQuestionReviewStatus((current) => ({ ...current, [selectedQuestionId]: 'unreviewed' }));
     setLastSuggestionIds((ids) => ids.filter((item) => item !== id));
   }
 
   function clearLines() {
-    setLines([]); setLastSuggestionIds([]); setSelectedQuestionId(null); setSelectedLineId(null); setOutputBreaks({}); setExclusions({}); setTrimOverrides({});
+    setLines([]); setLastSuggestionIds([]); setSelectedQuestionId(null); setSelectedLineId(null); setOutputBreaks({}); setExclusions({}); setTrimOverrides({}); setQuestionReviewStatus({});
   }
 
   function undoLastSuggestions() {
     if (!lastSuggestionIds.length) return;
     const ids = new Set(lastSuggestionIds);
     setLines((current) => current.filter((line) => !ids.has(line.id)));
+    setQuestionReviewStatus({});
     setLastSuggestionIds([]);
     setStatus('Removed the latest automatic suggestions. Your manual lines were kept.');
   }
@@ -403,6 +410,7 @@ function App() {
       const modeNote = usedTotalCount ? `${usedTotalCount} end${usedTotalCount === 1 ? '' : 's'} anchored to [Total: … marks].` : 'No [Total: … marks] lines were found, so ends were inferred from the next question number (MCQ-style fallback).';
       setStatus(`Added ${additions.length} non-destructive suggestions. ${modeNote}`);
       const merged = [...current, ...additions].sort(comparePos);
+      setQuestionReviewStatus({});
       const firstSuggestedStart = additions.find((line) => line.kind === START);
       if (firstSuggestedStart && !selectedQuestionId) setSelectedQuestionId(firstSuggestedStart.id);
       return merged;
@@ -616,7 +624,14 @@ function App() {
         outputPageBreakFractions: (outputBreaks[region.id] || []).map(round4),
         excludedOutputRanges: (exclusions[region.id] || []).map((range) => ({ startFraction: round4(range.start), endFraction: round4(range.end) })),
         pageTrimOverrides: Object.entries(trimOverrides[region.id] || {}).map(([page, trim]) => ({ page: Number(page), extraTopFraction: round4(trim.topExtra || 0), extraBottomFraction: round4(trim.bottomExtra || 0) })),
+        segmentationReviewStatus: questionReviewStatus[region.id] || 'unreviewed',
       })),
+      reviewSummary: {
+        reviewedQuestions: regions.filter((region) => ['approved', 'needs-fixing'].includes(questionReviewStatus[region.id])).length,
+        approvedQuestions: regions.filter((region) => questionReviewStatus[region.id] === 'approved').length,
+        needsFixingQuestions: regions.filter((region) => questionReviewStatus[region.id] === 'needs-fixing').length,
+        totalQuestions: regions.length,
+      },
       lines: [...lines].sort(comparePos).map((line) => ({
         page: line.page,
         yFractionFromTop: round4(line.y),
@@ -639,11 +654,70 @@ function App() {
   }
 
   const selectedRegion = regions.find((region) => region.id === selectedQuestionId) || null;
+  const selectedRegionIndex = regions.findIndex((region) => region.id === selectedQuestionId);
+  const reviewedQuestionCount = regions.filter((region) => ['approved', 'needs-fixing'].includes(questionReviewStatus[region.id])).length;
+  const approvedQuestionCount = regions.filter((region) => questionReviewStatus[region.id] === 'approved').length;
+  const allQuestionsReviewed = Boolean(regions.length) && reviewedQuestionCount === regions.length;
+
+  function jumpToQuestion(regionId, smooth = true) {
+    if (!regionId) return;
+    setSelectedQuestionId(regionId);
+    requestAnimationFrame(() => {
+      const target = Array.from(document.querySelectorAll('.segment-overlay[data-region-id]')).find((node) => node.dataset.regionId === regionId);
+      target?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'center' });
+    });
+  }
+
+  function moveQuestionSelection(delta) {
+    if (!regions.length) return;
+    const currentIndex = selectedRegionIndex >= 0 ? selectedRegionIndex : 0;
+    const nextIndex = clamp(currentIndex + delta, 0, regions.length - 1);
+    jumpToQuestion(regions[nextIndex].id);
+  }
+
+  function setCurrentQuestionReview(nextStatus, advance = false) {
+    if (!selectedRegion) return;
+    setQuestionReviewStatus((current) => ({ ...current, [selectedRegion.id]: nextStatus }));
+    if (advance && selectedRegionIndex < regions.length - 1) {
+      jumpToQuestion(regions[selectedRegionIndex + 1].id);
+      setStatus(`${selectedRegion.label} marked ${nextStatus === 'approved' ? 'looks good' : 'needs fixing'}. Moved to the next question.`);
+    } else if (advance) {
+      setStatus(`${selectedRegion.label} marked ${nextStatus === 'approved' ? 'looks good' : 'needs fixing'}. All questions have now been visited.`);
+    } else {
+      setStatus(`${selectedRegion.label} marked ${nextStatus === 'approved' ? 'looks good' : 'needs fixing'}.`);
+    }
+  }
+
+  function updateSegmentLabel(segmentId, value) {
+    setSegmentLabelOverrides((current) => ({ ...current, [segmentId]: value }));
+    if (selectedQuestionId) setQuestionReviewStatus((current) => ({ ...current, [selectedQuestionId]: 'unreviewed' }));
+  }
+
+  function updateSegmentPartFlag(segmentId, value) {
+    setSegmentPartFlags((current) => ({ ...current, [segmentId]: value }));
+    if (selectedQuestionId) setQuestionReviewStatus((current) => ({ ...current, [selectedQuestionId]: 'unreviewed' }));
+  }
 
   useEffect(() => {
     if (!selectedRegion?.segments?.length) { setSelectedSegmentId(null); return; }
     if (!selectedRegion.segments.some((segment) => segment.id === selectedSegmentId)) setSelectedSegmentId(selectedRegion.segments[0].id);
   }, [selectedRegion, selectedSegmentId]);
+
+  useEffect(() => {
+    function isInteractiveTarget(target) {
+      const tag = target?.tagName?.toLowerCase();
+      return ['input', 'textarea', 'select', 'button', 'a'].includes(tag) || target?.isContentEditable;
+    }
+    function handleReviewKeys(event) {
+      if (viewMode !== 'segment' || !regions.length || event.ctrlKey || event.metaKey || event.altKey || isInteractiveTarget(event.target)) return;
+      if (event.key === 'ArrowLeft') { moveQuestionSelection(-1); event.preventDefault(); return; }
+      if (event.key === 'ArrowRight') { moveQuestionSelection(1); event.preventDefault(); return; }
+      if (event.key === 'Enter') { setCurrentQuestionReview('approved', true); event.preventDefault(); }
+    }
+    window.addEventListener('keydown', handleReviewKeys);
+    return () => window.removeEventListener('keydown', handleReviewKeys);
+  }, [viewMode, regions, selectedRegionIndex, selectedQuestionId]);
+
   const counts = useMemo(() => ({
     start: lines.filter((l) => l.kind === START).length,
     end: lines.filter((l) => l.kind === END).length,
@@ -675,7 +749,7 @@ function App() {
           <nav className="workflow-stepper" aria-label="Workflow">
             <div className={`workflow-step ${file ? 'done' : 'active'}`}><span>{file ? '✓' : '1'}</span><small>Clean</small></div>
             <div className={`workflow-step ${file && !regions.length && viewMode === 'segment' ? 'active' : regions.length ? 'done' : ''}`}><span>{regions.length ? '✓' : '2'}</span><small>Questions</small></div>
-            <div className={`workflow-step ${regions.length && viewMode === 'segment' ? 'active' : viewMode === 'preview' ? 'done' : ''}`}><span>{viewMode === 'preview' ? '✓' : '3'}</span><small>Parts</small></div>
+            <div className={`workflow-step ${regions.length && viewMode === 'segment' ? 'active' : viewMode === 'preview' ? 'done' : ''}`}><span>{viewMode === 'preview' || allQuestionsReviewed ? '✓' : '3'}</span><small>Parts</small></div>
             <div className={`workflow-step ${viewMode === 'preview' ? 'active' : ''}`}><span>4</span><small>Layout</small></div>
             <div className="workflow-step"><span>5</span><small>Save</small></div>
           </nav>
@@ -707,7 +781,7 @@ function App() {
                 <div className="summary-metrics">
                   <div><strong>{regions.length}</strong><span>questions</span></div>
                   <div><strong>{counts.part}</strong><span>parts</span></div>
-                  <div className="review-metric"><strong>{regions.filter((region) => !region.endExplicit).length}</strong><span>need checking</span></div>
+                  <div className="review-metric"><strong>{reviewedQuestionCount}/{regions.length || 0}</strong><span>reviewed</span></div>
                 </div>
                 <details className="compact-details manual-details">
                   <summary>
@@ -730,22 +804,39 @@ function App() {
               </section>
 
               <section className="compact-section question-section">
-                <div className="section-heading-row"><div><div className="section-kicker">Check the paper</div><h2>Questions</h2></div><span className="question-count">{regions.length}</span></div>
+                <div className="section-heading-row"><div><div className="section-kicker">Check the paper</div><h2>Questions</h2></div><span className={`question-count ${allQuestionsReviewed ? 'complete' : ''}`}>{reviewedQuestionCount}/{regions.length}</span></div>
+                {!!regions.length && <p className="review-progress-copy">{allQuestionsReviewed ? 'All questions reviewed.' : `${regions.length - reviewedQuestionCount} left to review`} · <kbd>←</kbd> <kbd>→</kbd> navigate · <kbd>Enter</kbd> approve</p>}
                 {!regions.length && <p className="small">Questions will appear here after detection.</p>}
                 <div className="region-list question-list">
                   {regions.map((region) => {
                     const partCount = region.segments.filter((segment) => segment.isPart !== false).length;
-                    const needsCheck = !region.endExplicit || region.segments.some((segment) => segment.isPart !== false && !segment.detectedMarker && !segment.labelEditedByUser);
+                    const autoNeedsCheck = !region.endExplicit || region.segments.some((segment) => segment.isPart !== false && !segment.detectedMarker && !segment.labelEditedByUser);
+                    const reviewState = questionReviewStatus[region.id] || 'unreviewed';
+                    const dotClass = reviewState === 'approved' ? 'ok' : reviewState === 'needs-fixing' || autoNeedsCheck ? 'warn' : 'pending';
+                    const dotText = reviewState === 'approved' ? '✓' : reviewState === 'needs-fixing' ? '!' : '•';
+                    const statusText = reviewState === 'approved' ? 'approved' : reviewState === 'needs-fixing' ? 'fix' : autoNeedsCheck ? 'check' : `${partCount} part${partCount === 1 ? '' : 's'}`;
                     return (
-                      <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}>
-                        <span className="region-main"><span className={`qa-dot ${needsCheck ? 'warn' : 'ok'}`}>{needsCheck ? '!' : '✓'}</span><span className="region-name">{region.label}</span></span>
-                        <span className={`region-status ${needsCheck ? 'warn' : 'ok'}`}>{needsCheck ? 'check' : `${partCount} part${partCount === 1 ? '' : 's'}`}</span>
+                      <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => jumpToQuestion(region.id)}>
+                        <span className="region-main"><span className={`qa-dot ${dotClass}`}>{dotText}</span><span className="region-name">{region.label}</span></span>
+                        <span className={`region-status ${dotClass}`}>{statusText}</span>
                       </button>
                     );
                   })}
                 </div>
                 {selectedRegion && (
                   <div className="label-editor">
+                    <div className="question-review-card">
+                      <div className="question-review-heading">
+                        <span><strong>{selectedRegion.label}</strong><small>Question {selectedRegionIndex + 1} of {regions.length}</small></span>
+                        <span className={`review-state-pill ${questionReviewStatus[selectedRegion.id] || 'unreviewed'}`}>{questionReviewStatus[selectedRegion.id] === 'approved' ? 'Looks good' : questionReviewStatus[selectedRegion.id] === 'needs-fixing' ? 'Needs fixing' : 'Unreviewed'}</span>
+                      </div>
+                      <div className="question-review-actions">
+                        <button type="button" className="ghost compact icon-only" onClick={() => moveQuestionSelection(-1)} disabled={selectedRegionIndex <= 0} aria-label="Previous question">←</button>
+                        <button type="button" className="ghost compact needs-fix-button" onClick={() => setCurrentQuestionReview('needs-fixing', false)}>Needs fixing</button>
+                        <button type="button" className="primary compact approve-button" onClick={() => setCurrentQuestionReview('approved', true)}>✓ Looks good & next</button>
+                        <button type="button" className="ghost compact icon-only" onClick={() => moveQuestionSelection(1)} disabled={selectedRegionIndex >= regions.length - 1} aria-label="Next question">→</button>
+                      </div>
+                    </div>
                     <label>Question label<input value={selectedRegion.start.label || selectedRegion.label} onChange={(e) => updateLineLabel(selectedRegion.start.id, e.target.value)} /></label>
                     <div className="segment-label-list">
                       {selectedRegion.segments.map((segment) => (
@@ -757,27 +848,28 @@ function App() {
                     {selectedRegion.segments.map((segment) => selectedSegmentId === segment.id && (
                       <div key={`edit-${segment.id}`} className="selected-segment-editor">
                         <label>Selected segment
-                          <input value={segment.label} disabled={segment.isPart === false} onChange={(e) => setSegmentLabelOverrides((current) => ({ ...current, [segment.id]: e.target.value }))} />
+                          <input value={segment.label} disabled={segment.isPart === false} onChange={(e) => updateSegmentLabel(segment.id, e.target.value)} />
                         </label>
                         {segment.isPart !== false && <p className={`label-evidence ${segment.detectedMarker ? 'detected' : 'uncertain'}`}>{segment.labelEditedByUser ? 'Manual label' : segment.labelEvidence}</p>}
-                        <label className="check-row segment-part-toggle"><input type="checkbox" checked={segment.isPart !== false} onChange={(e) => setSegmentPartFlags((current) => ({ ...current, [segment.id]: e.target.checked }))} />Treat this region as a question part</label>
+                        <label className="check-row segment-part-toggle"><input type="checkbox" checked={segment.isPart !== false} onChange={(e) => updateSegmentPartFlag(segment.id, e.target.checked)} />Treat this region as a question part</label>
                         {segment.isPart === false && <p className="small">The content remains inside the whole-question crop, but this final region will not be tagged or exported as a question part.</p>}
                       </div>
                     ))}
-                    {selectedSegmentId && segmentLabelOverrides[selectedSegmentId] && <button type="button" className="ghost full" onClick={() => setSegmentLabelOverrides((current) => { const next = { ...current }; delete next[selectedSegmentId]; return next; })}>Use automatic label</button>}
+                    {selectedSegmentId && segmentLabelOverrides[selectedSegmentId] && <button type="button" className="ghost full" onClick={() => { setSegmentLabelOverrides((current) => { const next = { ...current }; delete next[selectedSegmentId]; return next; }); if (selectedQuestionId) setQuestionReviewStatus((current) => ({ ...current, [selectedQuestionId]: 'unreviewed' })); }}>Use automatic label</button>}
                   </div>
                 )}
               </section>
 
               <section className="compact-section review-cta-section">
-                <button className="primary full" onClick={enterPreview} disabled={!regions.length}>Review page layout →</button>
+                <button className={`${allQuestionsReviewed ? 'primary' : 'ghost'} full`} onClick={enterPreview} disabled={!regions.length}>{allQuestionsReviewed ? 'Review page layout →' : `Review page layout · ${reviewedQuestionCount}/${regions.length}`}</button>
+                {!!regions.length && !allQuestionsReviewed && <p className="small review-cta-hint">You can continue at any time; unreviewed questions will remain flagged.</p>}
               </section>
             </>
           ) : (
             <>
               <section className="compact-section"><button className="ghost full" onClick={() => setViewMode('segment')}>← Back to questions</button></section>
-              <section className="compact-section"><h2>Review questions</h2><div className="region-list preview-region-list">{regions.map((region) => <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}><span className="region-name">{region.label}</span><span className="region-status ok">layout</span></button>)}</div></section>
-              <section className="compact-section"><button className="primary full" onClick={exportJson}>Save segmentation JSON</button><p className="small">Saves the source boundaries plus reviewed page layout.</p></section>
+              <section className="compact-section"><h2>Review questions</h2><div className="region-list preview-region-list">{regions.map((region) => <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}><span className="region-name">{region.label}</span><span className={`region-status ${questionReviewStatus[region.id] === 'approved' ? 'ok' : questionReviewStatus[region.id] === 'needs-fixing' ? 'warn' : 'pending'}`}>{questionReviewStatus[region.id] === 'approved' ? 'checked' : questionReviewStatus[region.id] === 'needs-fixing' ? 'fix first' : 'unreviewed'}</span></button>)}</div></section>
+              <section className="compact-section"><button className="primary full" onClick={exportSegmentation}>Save segmentation JSON</button><p className="small">Saves source boundaries, question-review status and reviewed page layout.</p></section>
             </>
           )}
         </aside>
@@ -894,7 +986,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
           const heightPct = ((bottomNorm - topNorm) / visibleHeight) * 100;
           const selected = selectedQuestionId === region.id && selectedSegmentId === segment.id;
           return (
-            <div key={`${region.id}-${segment.id}-${pageData.pageNumber}`} className={`segment-overlay ${selected ? 'selected' : ''} ${segment.isPart === false ? 'not-part' : ''}`} style={{ top: `${topPct}%`, height: `${heightPct}%` }}>
+            <div key={`${region.id}-${segment.id}-${pageData.pageNumber}`} data-region-id={region.id} className={`segment-overlay ${selected ? 'selected' : ''} ${segment.isPart === false ? 'not-part' : ''}`} style={{ top: `${topPct}%`, height: `${heightPct}%` }}>
               <button type="button" className="segment-watermark" onClick={(e) => { e.stopPropagation(); onSelectSegment(region.id, segment.id); }} title="Click to edit this segment label">{segment.isPart === false ? 'NOT A PART' : segment.label}</button>
             </div>
           );
