@@ -142,6 +142,9 @@ function App() {
   const [segmentationApprovedAt, setSegmentationApprovedAt] = useState(null);
   const [approvalIssues, setApprovalIssues] = useState([]);
   const [scrollToSegmentEditorId, setScrollToSegmentEditorId] = useState(null);
+  const [workflowKind, setWorkflowKind] = useState('questions');
+  const [questionPayload, setQuestionPayload] = useState(null);
+  const [solutionPayload, setSolutionPayload] = useState(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => () => { if (pdf) pdf.destroy(); }, [pdf]);
@@ -197,7 +200,7 @@ function App() {
     };
   }, [selectedLineId, headerPct, footerPct, viewMode]);
 
-  async function openPdf(selected) {
+  async function openPdf(selected, kindOverride = workflowKind) {
     if (!selected) return;
     setLoading(true);
     setStatus('Loading PDF…');
@@ -226,13 +229,98 @@ function App() {
       }
       nextPages.forEach((pageData) => { pageData.rows = extractTextRows(pageData); });
       setPages(nextPages);
-      setStatus(`${loadedPdf.numPages} pages loaded. Use Suggest regions, then scan the proposed starts, ends and part lines.`);
+      setStatus(kindOverride === 'solutions'
+        ? `${loadedPdf.numPages} solution pages loaded. Detect solution blocks, then reconcile them against the approved question list.`
+        : `${loadedPdf.numPages} pages loaded. Detect questions & parts, then scan the proposed starts, ends and part lines.`);
     } catch (error) {
       console.error(error);
       setStatus('Could not open this PDF. Please try another file.');
       setFile(null); setPdf(null); setPages([]);
     } finally {
       setLoading(false);
+    }
+  }
+
+
+  async function parseQuestionJson(selected) {
+    const text = await selected.text();
+    const payload = JSON.parse(text);
+    const questions = Array.isArray(payload?.questions) ? payload.questions : [];
+    const isQuestionJson = payload?.documentType === 'question-segmentation' || payload?.schemaVersion === 4;
+    if (!isQuestionJson || !questions.length) throw new Error('not-question-segmentation');
+    return payload;
+  }
+
+  function resetForSolutionIntake(payload) {
+    const questions = Array.isArray(payload?.questions) ? payload.questions : [];
+    setQuestionPayload(payload);
+    setSolutionPayload(null);
+    setWorkflowKind('solutions');
+    setFile(null);
+    setPdf(null);
+    setPages([]);
+    setLines([]);
+    setLastSuggestionIds([]);
+    setSelectedQuestionId(null);
+    setSelectedLineId(null);
+    setSelectedSegmentId(null);
+    setOutputBreaks({});
+    setExclusions({});
+    setTrimOverrides({});
+    setGlobalReviewTrim({ topExtra: 0, bottomExtra: 0 });
+    setSegmentationApproved(false);
+    setSegmentationApprovedAt(null);
+    setApprovalIssues([]);
+    setViewMode('segment');
+    return questions.length;
+  }
+
+  async function handleIntakeFiles(fileList) {
+    const selected = Array.from(fileList || []).filter(Boolean);
+    if (!selected.length) return;
+
+    const pdfFiles = selected.filter((item) => item.type === 'application/pdf' || /\.pdf$/i.test(item.name));
+    const jsonFiles = selected.filter((item) => item.type === 'application/json' || /\.json$/i.test(item.name));
+
+    try {
+      // Normal start: one paper PDF means a new question-paper crop.
+      if (selected.length === 1 && pdfFiles.length === 1) {
+        if (workflowKind === 'solutions' && questionPayload) {
+          await openPdf(pdfFiles[0], 'solutions');
+        } else {
+          setWorkflowKind('questions');
+          setQuestionPayload(null);
+          setSolutionPayload(null);
+          await openPdf(pdfFiles[0], 'questions');
+        }
+        return;
+      }
+
+      // Resume automatically: select the saved question JSON and the matching
+      // solution PDF in the same file-picker action. No separate mode choice.
+      if (selected.length === 2 && pdfFiles.length === 1 && jsonFiles.length === 1) {
+        const payload = await parseQuestionJson(jsonFiles[0]);
+        const count = resetForSolutionIntake(payload);
+        setStatus(`Question JSON recognised. Loading the solution PDF and reconciling it against ${count} parent questions…`);
+        await openPdf(pdfFiles[0], 'solutions');
+        return;
+      }
+
+      // Keep JSON-only intake as a graceful fallback if the solution has not
+      // been selected yet; the next single PDF chosen is treated as the solution.
+      if (selected.length === 1 && jsonFiles.length === 1) {
+        const payload = await parseQuestionJson(jsonFiles[0]);
+        const count = resetForSolutionIntake(payload);
+        setStatus(`Question JSON loaded. Choose the matching solution PDF; ${count} parent questions will be reconciled against it.`);
+        return;
+      }
+
+      setStatus('Choose either one question-paper PDF, or exactly two files together: the saved question JSON plus its solution PDF.');
+    } catch (error) {
+      console.error(error);
+      setStatus('Could not recognise that intake. Use one question-paper PDF, or select the saved question JSON and matching solution PDF together.');
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   }
 
@@ -312,7 +400,9 @@ function App() {
       const bottom = 1 - footerPct / 100;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom || row.xNorm > 0.19) continue;
-        const match = row.text.match(/^(?:Q\s*)?(\d{1,2})(?=\s|\(|[.)])/i);
+        const match = workflowKind === 'solutions'
+          ? row.text.match(/^(?:Q\s*)?(\d{1,2})(?=\s|\(|[.)]|[a-h](?:[ivxlcdm]+)?\b)/i)
+          : row.text.match(/^(?:Q\s*)?(\d{1,2})(?=\s|\(|[.)])/i);
         if (!match) continue;
         starts.push({
           page: pageData.pageNumber,
@@ -322,7 +412,16 @@ function App() {
         });
       }
     }
-    return starts.sort(comparePos).filter((candidate, idx, arr) => {
+    const ordered = starts.sort(comparePos);
+    if (workflowKind === 'solutions') {
+      const seen = new Set();
+      return ordered.filter((candidate) => {
+        if (seen.has(candidate.number)) return false;
+        seen.add(candidate.number);
+        return true;
+      });
+    }
+    return ordered.filter((candidate, idx, arr) => {
       if (idx === 0) return true;
       const previous = arr[idx - 1];
       if (candidate.number === previous.number && Math.abs(posKey(candidate) - posKey(previous)) < 1000) return false;
@@ -391,7 +490,12 @@ function App() {
         end = { page: pages.length, y: round4(1 - footerPct / 100 - 0.008) };
       }
 
-      candidates.push({ id: makeId(START), page: start.page, y: start.y, kind: START, label: start.label, manualLabel: false, source: 'suggested', questionIndex: index });
+      const detectedLabel = `Q${start.number}`;
+      const authoritativeMatch = workflowKind === 'solutions'
+        ? questionPayload?.questions?.find((question) => question.label === detectedLabel)?.label
+        : null;
+      const authoritativeLabel = authoritativeMatch || start.label;
+      candidates.push({ id: makeId(START), page: start.page, y: start.y, kind: START, label: authoritativeLabel, manualLabel: false, source: 'suggested', questionIndex: index });
       candidates.push({ id: makeId(END), page: end.page, y: safeY(end.y), kind: END, label: '', manualLabel: false, source: 'suggested', questionIndex: index });
 
       const questionPartStarts = rawParts.filter((part) => within(part, start, end) && Math.abs(posKey(part) - posKey(start)) > 180);
@@ -600,29 +704,30 @@ function App() {
   }, [regions, selectedQuestionId]);
 
   useEffect(() => {
+    if (workflowKind === 'solutions') setSolutionPayload(null);
+    else setQuestionPayload(null);
     if (!segmentationApproved) return;
     setSegmentationApproved(false);
     setSegmentationApprovedAt(null);
     setApprovalIssues([]);
   }, [lines, headerPct, footerPct, segmentLabelOverrides, segmentPartFlags]);
 
-  function exportSegmentation() {
-    if (!file || !pages.length) return;
-    const issues = validateSegmentation();
-    if (!segmentationApproved || issues.length) {
-      setApprovalIssues(issues);
-      setStatus(issues.length ? 'Cannot save yet. Fix the flagged segmentation issues, then approve questions & parts.' : 'Approve questions & parts before saving.');
-      return;
-    }
-    const payload = {
-      schemaVersion: 4,
+  function buildSegmentationPayload(documentKind = workflowKind) {
+    if (!file || !pages.length) return null;
+    const isSolution = documentKind === 'solutions';
+    return {
+      schemaVersion: isSolution ? 1 : 4,
+      documentType: isSolution ? 'solution-segmentation' : 'question-segmentation',
       sourceFile: file.name,
+      sourceQuestionFile: isSolution ? (questionPayload?.sourceFile || null) : undefined,
       createdAt: new Date().toISOString(),
       headerFraction: round4(headerPct / 100),
       footerFraction: round4(footerPct / 100),
       pageCount: pages.length,
-      questions: regions.map((region) => ({
-        label: region.label,
+      expectedQuestionLabels: isSolution ? (questionPayload?.questions || []).map((question) => question.label) : undefined,
+      questions: regions.map((region, index) => ({
+        questionRef: isSolution ? (questionPayload?.questions?.[index]?.label || region.label) : undefined,
+        label: isSolution ? (questionPayload?.questions?.[index]?.label || region.label) : region.label,
         start: { page: region.start.page, yFractionFromTop: round4(region.start.y) },
         end: { page: region.end.page, yFractionFromTop: round4(region.end.y), explicit: region.endExplicit },
         parts: region.parts.map((part) => ({
@@ -655,16 +760,88 @@ function App() {
         source: line.source || 'manual',
       })),
       globalReviewTrim: { extraTopFraction: round4(globalReviewTrim.topExtra || 0), extraBottomFraction: round4(globalReviewTrim.bottomExtra || 0) },
-      notes: 'Question starts/ends define source ownership. Review-only global/local trim overrides, excluded output ranges and publication page breaks alter layout only; they do not change source question ownership.',
+      reconciliation: isSolution ? {
+        expectedQuestionCount: questionPayload?.questions?.length || 0,
+        matchedQuestionCount: regions.length,
+        exactParentMatch: Boolean(questionPayload?.questions?.length && questionPayload.questions.length === regions.length),
+      } : undefined,
+      notes: isSolution
+        ? 'Solution boundaries are matched in order to the approved question-paper question list. Parent question identity comes from the question JSON, not from solution-page numbering alone.'
+        : 'Question starts/ends define source ownership. Review-only global/local trim overrides, excluded output ranges and publication page breaks alter layout only; they do not change source question ownership.',
     };
+  }
+
+  function downloadJson(payload, filename) {
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${file.name.replace(/\.pdf$/i, '')}.segmentation.json`;
+    anchor.download = filename;
     anchor.click();
     URL.revokeObjectURL(url);
-    setStatus('Approved segmentation saved, including reviewed publication page breaks.');
+  }
+
+  function exportSegmentation() {
+    if (!file || !pages.length) return;
+    const issues = validateSegmentation();
+    if (!segmentationApproved || issues.length) {
+      setApprovalIssues(issues);
+      setStatus(issues.length ? 'Cannot save yet. Fix the flagged segmentation issues, then approve questions & parts.' : 'Approve questions & parts before saving.');
+      return;
+    }
+    const payload = buildSegmentationPayload();
+    if (!payload) return;
+    const base = file.name.replace(/\.pdf$/i, '');
+    if (workflowKind === 'solutions') {
+      setSolutionPayload(payload);
+      downloadJson(payload, `${base}.solutions.json`);
+      setStatus('Solution JSON saved and matched to the approved question list. You can now download the combined package.');
+    } else {
+      setQuestionPayload(payload);
+      downloadJson(payload, `${base}.segmentation.json`);
+      setStatus('Question JSON saved. Continue with the solution file when ready.');
+    }
+  }
+
+  function continueWithSolutions() {
+    if (!segmentationApproved) return;
+    const payload = questionPayload || buildSegmentationPayload('questions');
+    if (!payload) return;
+    setQuestionPayload(payload);
+    setWorkflowKind('solutions');
+    setSolutionPayload(null);
+    setFile(null);
+    setPdf(null);
+    setPages([]);
+    setLines([]);
+    setLastSuggestionIds([]);
+    setSelectedQuestionId(null);
+    setSelectedLineId(null);
+    setSelectedSegmentId(null);
+    setOutputBreaks({});
+    setExclusions({});
+    setTrimOverrides({});
+    setSegmentationApproved(false);
+    setSegmentationApprovedAt(null);
+    setApprovalIssues([]);
+    setViewMode('segment');
+    setStatus(`Question JSON retained in this browser session. Choose the solution PDF; ${payload.questions.length} parent questions must reconcile exactly.`);
+    setTimeout(() => fileInputRef.current?.click(), 0);
+  }
+
+  function downloadCombinedPackage() {
+    const currentSolution = solutionPayload || (workflowKind === 'solutions' && segmentationApproved ? buildSegmentationPayload('solutions') : null);
+    if (!questionPayload || !currentSolution) return;
+    const bundle = {
+      schemaVersion: 1,
+      packageType: 'question-and-solution-segmentation',
+      createdAt: new Date().toISOString(),
+      questionSegmentation: questionPayload,
+      solutionSegmentation: currentSolution,
+    };
+    const base = (questionPayload.sourceFile || 'prelim-paper').replace(/\.pdf$/i, '');
+    downloadJson(bundle, `${base}.question-solution-bundle.json`);
+    setStatus('Combined question + solution segmentation package downloaded.');
   }
 
   const selectedRegion = regions.find((region) => region.id === selectedQuestionId) || null;
@@ -730,6 +907,18 @@ function App() {
       }
     });
 
+    if (workflowKind === 'solutions' && questionPayload?.questions?.length) {
+      const expected = questionPayload.questions.map((question) => question.label);
+      const actual = regions.map((region) => region.label);
+      if (actual.length !== expected.length) {
+        issues.push({ type: 'paper', message: `Solution reconciliation expected ${expected.length} parent questions from the question JSON, but found ${actual.length}.` });
+      } else {
+        actual.forEach((label, index) => {
+          if (label !== expected[index]) issues.push({ type: 'question', regionId: regions[index]?.id, message: `Solution block ${index + 1} must match ${expected[index]}, but is labelled ${label}.` });
+        });
+      }
+    }
+
     return issues;
   }
 
@@ -760,7 +949,7 @@ function App() {
     setSegmentationApproved(true);
     setSegmentationApprovedAt(now);
     setApprovalIssues([]);
-    setStatus('Questions and parts approved. You can now review page layout and save the segmentation JSON.');
+    setStatus(workflowKind === 'solutions' ? 'Solution blocks approved and reconciled to the question JSON. Review layout, then save the solution JSON.' : 'Questions and parts approved. You can now review page layout and save the segmentation JSON.');
   }
 
   function updateSegmentLabel(segmentId, value) {
@@ -821,11 +1010,11 @@ function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">Local browser tool</p>
-          <h1>Prelim Cropper</h1>
-          <p className="subtitle">Prepare the paper, check questions and parts, then review worksheet pages.</p>
+          <h1>{workflowKind === 'solutions' ? 'Prelim Solution Cropper' : 'Prelim Cropper'}</h1>
+          <p className="subtitle">{workflowKind === 'solutions' ? `Match the solution file to the ${questionPayload?.questions?.length || 0} approved question parents, then review the solution crops.` : 'Prepare the paper, check questions and parts, then review worksheet pages.'}</p>
         </div>
-        {file && <button className="primary" onClick={() => fileInputRef.current?.click()} disabled={loading}>Change PDF</button>}
-        <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf" onChange={(e) => openPdf(e.target.files?.[0])} />
+        {file && <button className="primary" onClick={() => fileInputRef.current?.click()} disabled={loading}>Change {workflowKind === 'solutions' ? 'solution' : 'files'}</button>}
+        <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf,application/json,.json" multiple onChange={(e) => handleIntakeFiles(e.target.files)} />
       </header>
 
       <main className={`workspace ${viewMode === 'preview' ? 'preview-mode-shell' : ''}`}>
@@ -857,10 +1046,10 @@ function App() {
 
               <section className="compact-section">
                 <div className="section-kicker">Automatic first pass</div>
-                <h2>Questions & parts</h2>
+                <h2>{workflowKind === 'solutions' ? 'Solution blocks' : 'Questions & parts'}</h2>
                 <button className="detect-card" onClick={suggestRegions} disabled={!pages.length || loading}>
                   <span className="detect-icon">✦</span>
-                  <span><strong>Detect questions & parts</strong><small>Find starts, ends and printed subparts automatically</small></span>
+                  <span><strong>{workflowKind === 'solutions' ? 'Detect solution blocks' : 'Detect questions & parts'}</strong><small>{workflowKind === 'solutions' ? 'Find the first block for each parent question, then match in order' : 'Find starts, ends and printed subparts automatically'}</small></span>
                 </button>
                 <div className="summary-metrics">
                   <div><strong>{regions.length}</strong><span>questions</span></div>
@@ -888,7 +1077,8 @@ function App() {
               </section>
 
               <section className="compact-section question-section">
-                <div className="section-heading-row"><div><div className="section-kicker">Check the paper</div><h2>Questions</h2></div><span className={`question-count ${segmentationApproved ? 'complete' : liveApprovalIssues.length ? 'warn' : ''}`}>{regions.length}</span></div>
+                <div className="section-heading-row"><div><div className="section-kicker">{workflowKind === 'solutions' ? 'Match to question JSON' : 'Check the paper'}</div><h2>{workflowKind === 'solutions' ? 'Solution parents' : 'Questions'}</h2></div><span className={`question-count ${segmentationApproved ? 'complete' : liveApprovalIssues.length ? 'warn' : ''}`}>{regions.length}</span></div>
+                {workflowKind === 'solutions' && questionPayload && <p className="review-progress-copy">Expected: {questionPayload.questions.length} parent questions. Parent identity is inherited from the approved question JSON.</p>}
                 {!regions.length && <p className="small">Questions will appear here after detection.</p>}
                 {!!regions.length && liveApprovalIssues.length === 0 && !segmentationApproved && <p className="review-progress-copy">Edit as you go. When everything looks right, approve the whole paper once.</p>}
                 {!!regions.length && segmentationApproved && <p className="review-progress-copy approval-ok">✓ Questions and parts approved</p>}
@@ -906,7 +1096,7 @@ function App() {
                 </div>
                 {selectedRegion && (
                   <div className="label-editor">
-                    <label>Question label<input value={selectedRegion.start.label || selectedRegion.label} onChange={(e) => updateLineLabel(selectedRegion.start.id, e.target.value)} /></label>
+                    <label>Question label<input value={selectedRegion.start.label || selectedRegion.label} disabled={workflowKind === 'solutions'} onChange={(e) => updateLineLabel(selectedRegion.start.id, e.target.value)} /></label>
                     <div className="segment-label-list">
                       {selectedRegion.segments.map((segment) => (
                         <button key={segment.id} type="button" className={`segment-label-row ${selectedSegmentId === segment.id ? 'selected' : ''} ${segment.isPart === false ? 'not-part' : ''}`} onClick={() => setSelectedSegmentId(segment.id)}>
@@ -933,8 +1123,8 @@ function App() {
               </section>
 
               <section className="compact-section review-cta-section">
-                {!!regions.length && !segmentationApproved && <button className="primary full" onClick={approveSegmentation}>✓ Approve questions & parts</button>}
-                {!!regions.length && segmentationApproved && <button className="approval-confirmed full" type="button" disabled>✓ Questions & parts approved</button>}
+                {!!regions.length && !segmentationApproved && <button className="primary full" onClick={approveSegmentation}>{workflowKind === 'solutions' ? '✓ Approve solution matches' : '✓ Approve questions & parts'}</button>}
+                {!!regions.length && segmentationApproved && <button className="approval-confirmed full" type="button" disabled>{workflowKind === 'solutions' ? '✓ Solution matches approved' : '✓ Questions & parts approved'}</button>}
                 {!!regions.length && liveApprovalIssues.length > 0 && (
                   <details className="approval-issues compact-approval-issues">
                     <summary>{liveApprovalIssues.length} issue{liveApprovalIssues.length === 1 ? '' : 's'} to fix before approval</summary>
@@ -948,16 +1138,23 @@ function App() {
           ) : (
             <>
               <section className="compact-section"><button className="ghost full" onClick={() => setViewMode('segment')}>← Back to questions</button></section>
-              <section className="compact-section"><h2>Questions</h2><div className="region-list preview-region-list">{regions.map((region) => <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}><span className="region-name">{region.label}</span><span className="region-status ok">approved</span></button>)}</div></section>
-              <section className="compact-section"><button className="primary full" onClick={exportSegmentation} disabled={!segmentationApproved}>Save segmentation JSON</button><p className="small">Saves the approved source boundaries and reviewed page layout.</p></section>
+              <section className="compact-section"><h2>{workflowKind === 'solutions' ? 'Solution parents' : 'Questions'}</h2><div className="region-list preview-region-list">{regions.map((region) => <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}><span className="region-name">{region.label}</span><span className="region-status ok">approved</span></button>)}</div></section>
+              <section className="compact-section">
+                <button className="primary full" onClick={exportSegmentation} disabled={!segmentationApproved}>{workflowKind === 'solutions' ? 'Save solution JSON' : 'Save question JSON'}</button>
+                <p className="small">Saves the approved source boundaries and reviewed page layout.</p>
+                {workflowKind === 'questions' && questionPayload && segmentationApproved && <button className="ghost full" type="button" onClick={continueWithSolutions}>Continue with solutions →</button>}
+                {workflowKind === 'solutions' && questionPayload && solutionPayload && segmentationApproved && <button className="ghost full" type="button" onClick={downloadCombinedPackage}>Download both JSONs together</button>}
+              </section>
             </>
           )}
         </aside>
       <section className="document-area">
           {!file && (
-            <div className="empty-state" onClick={() => fileInputRef.current?.click()}>
-              <div className="empty-icon">PDF</div><h2>Choose a prelim paper</h2>
-              <p>The paper stays in this browser session. Nothing is uploaded to a server.</p><button className="primary">Choose PDF</button>
+            <div className="empty-state">
+              <div className="empty-icon">PDF</div><h2>{workflowKind === 'solutions' ? 'Choose the matching solution file' : 'Choose files'}</h2>
+              <p>{workflowKind === 'solutions' ? `The question JSON is loaded locally. Choose its solution PDF; it must reconcile to ${questionPayload?.questions?.length || 0} parent questions.` : 'Select one question-paper PDF to start. To continue a paper later, select its saved question JSON and matching solution PDF together.'}</p>
+              <button className="primary" onClick={() => fileInputRef.current?.click()}>Choose {workflowKind === 'solutions' ? 'solution PDF' : 'files'}</button>
+              {workflowKind === 'questions' && <small className="panel-note">One PDF = new question paper · Question JSON + solution PDF = continue automatically.</small>}
             </div>
           )}
           {loading && <div className="loading-card">Preparing pages…</div>}
