@@ -149,3 +149,47 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
 .trim-card-heading span { color:#64748b; font-size:0.88rem; }
 .trim-page-row.global-trim-row { background:#f8fafc; }
 .ghost.compact { padding:6px 9px; font-size:0.78rem; }
+
+/* Guided teacher workflow UI */
+.workflow-steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; margin: -4px 0 20px; padding-bottom: 18px; border-bottom: 1px solid #e2e8f0; }
+.workflow-step { display: grid; justify-items: center; gap: 5px; color: #94a3b8; min-width: 0; }
+.workflow-step span { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 50%; border: 1px solid #cbd5e1; background: #fff; font-size: .68rem; font-weight: 850; }
+.workflow-step b { max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-size: .61rem; font-weight: 800; white-space: nowrap; }
+.workflow-step.active { color: #1f5f75; }
+.workflow-step.active span { border-color: #1f5f75; background: #e8f3f6; box-shadow: 0 0 0 3px rgba(31,95,117,.08); }
+.workflow-step.done { color: #557b64; }
+.workflow-step.done span { border-color: #9fc5ad; background: #edf7f0; }
+.section-kicker { margin: 0 0 5px; color: #94a3b8; font-size: .61rem; font-weight: 850; letter-spacing: .1em; }
+.detect-button { display: flex; align-items: center; gap: 11px; width: 100%; margin-top: 6px; padding: 13px 14px; border: 1px solid #b9d8e1; border-radius: 12px; background: linear-gradient(180deg,#f0f8fa,#e7f3f6); color: #194f61; text-align: left; transition: .15s ease; }
+.detect-button:hover:not(:disabled) { border-color: #7fb1c0; box-shadow: 0 5px 14px rgba(31,95,117,.12); transform: translateY(-1px); }
+.detect-button .detect-icon { flex: 0 0 auto; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: #1f5f75; color: #fff; font-size: 1rem; }
+.detect-button > span:last-child { display: grid; gap: 2px; }
+.detect-button strong { font-size: .84rem; }
+.detect-button small { color: #5f7680; font-size: .69rem; line-height: 1.35; }
+.detect-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 9px; }
+.detect-summary > span { display: grid; gap: 1px; padding: 7px 5px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; color: #64748b; text-align: center; font-size: .62rem; }
+.detect-summary strong { color: #334155; font-size: .82rem; }
+.detect-summary .needs-check { border-color: #ead8b8; background: #fffaf0; color: #95651f; }
+.detect-summary .needs-check strong { color: #95651f; }
+.detect-summary .all-clear { border-color: #cfe4d7; background: #f3faf5; color: #4d765c; }
+.boundary-tools { margin-top: 11px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+.boundary-tools summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 11px; color: #475569; cursor: pointer; font-size: .76rem; font-weight: 800; list-style: none; }
+.boundary-tools summary::-webkit-details-marker { display: none; }
+.boundary-tools summary::before { content: '+'; display: inline-grid; place-items: center; width: 18px; height: 18px; margin-right: 2px; border-radius: 5px; background: #f1f5f9; color: #64748b; }
+.boundary-tools[open] summary::before { content: '−'; }
+.boundary-tools summary span { margin-left: auto; color: #94a3b8; font-size: .64rem; font-weight: 700; }
+.boundary-tools[open] { padding: 0 10px 10px; }
+.boundary-tools[open] summary { margin: 0 -10px 4px; border-bottom: 1px solid #eef2f6; }
+.compact-actions { grid-template-columns: 1fr 1fr; }
+.compact-actions .clear-button { grid-column: auto; }
+.region-row { justify-content: flex-start; min-height: 46px; }
+.question-check { flex: 0 0 22px; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; font-size: .7rem; font-weight: 900; }
+.question-check.ok { background: #edf7f0; color: #4d765c; }
+.question-check.warn { background: #fff4df; color: #9a651d; }
+.region-copy { min-width: 0; display: grid; gap: 1px; flex: 1; }
+.region-copy small { color: #94a3b8; font-size: .65rem; }
+.region-status { flex: 0 0 auto; text-align: right; }
+
+@media (max-width: 900px) {
+  .workflow-steps { max-width: 520px; }
+}
