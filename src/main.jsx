@@ -1741,12 +1741,14 @@ function App() {
         return match ? Number(match[1]) : null;
       });
       if (parsedNumbers.some((number) => number == null)) {
-        issues.push({ type: 'paper', message: 'One or more question starts has no usable question number. Check the question labels.' });
+        const badIndex = parsedNumbers.findIndex((number) => number == null);
+        issues.push({ type: 'paper', lineId: starts[badIndex]?.id, page: starts[badIndex]?.page, message: 'One or more question starts has no usable question number. Check the question labels.' });
       } else if (parsedNumbers.length) {
         const expected = parsedNumbers.map((_, index) => index + 1);
         const same = parsedNumbers.length === expected.length && parsedNumbers.every((number, index) => number === expected[index]);
         if (!same) {
-          issues.push({ type: 'paper', message: `Question starts are not a clean Q1–Q${starts.length} sequence (${parsedNumbers.map((n) => n ?? '?').join(', ')}). This often indicates an extra detected START line.` });
+          const mismatchIndex = parsedNumbers.findIndex((number, index) => number !== expected[index]);
+          issues.push({ type: 'paper', lineId: starts[mismatchIndex]?.id, page: starts[mismatchIndex]?.page, message: `Question starts are not a clean Q1–Q${starts.length} sequence (${parsedNumbers.map((n) => n ?? '?').join(', ')}). This often indicates an extra detected START line.` });
         }
       }
     }
@@ -1766,13 +1768,13 @@ function App() {
         const nextStart = starts[index + 1] || null;
         return comparePos(end, start) > 0 && (!nextStart || comparePos(end, nextStart) < 0);
       });
-      if (ownerIndex < 0) issues.push({ type: 'paper', message: `An END line on page ${end.page} is not attached to any question.` });
+      if (ownerIndex < 0) issues.push({ type: 'paper', lineId: end.id, page: end.page, message: `An END line on page ${end.page} is not attached to any question.` });
     });
 
     parts.forEach((part) => {
       const owners = regions.filter((region) => within(part, region.start, region.end));
-      if (owners.length === 0) issues.push({ type: 'paper', message: `A PART line on page ${part.page} sits outside all question boundaries.` });
-      if (owners.length > 1) issues.push({ type: 'paper', message: `A PART line on page ${part.page} appears to belong to more than one question.` });
+      if (owners.length === 0) issues.push({ type: 'paper', lineId: part.id, page: part.page, message: `A PART line on page ${part.page} sits outside all question boundaries.` });
+      if (owners.length > 1) issues.push({ type: 'paper', lineId: part.id, page: part.page, message: `A PART line on page ${part.page} appears to belong to more than one question.` });
     });
 
     regions.forEach((region, regionIndex) => {
@@ -1827,6 +1829,33 @@ function App() {
       const target = Array.from(document.querySelectorAll('.segment-overlay[data-region-id]')).find((node) => node.dataset.regionId === regionId);
       target?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'center' });
     });
+  }
+
+  function jumpToIssue(issue) {
+    if (!issue) return;
+    if (issue.lineId) {
+      const line = lines.find((item) => item.id === issue.lineId);
+      if (line) {
+        setSelectedLineId(line.id);
+        const owner = regions.find((region) => region.start.id === line.id || region.end.id === line.id || within(line, region.start, region.end));
+        if (owner?.id) setSelectedQuestionId(owner.id);
+        requestAnimationFrame(() => {
+          const target = document.querySelector(`.crop-line[data-line-id="${line.id}"]`);
+          target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+        return;
+      }
+    }
+    if (issue.regionId) {
+      jumpToQuestion(issue.regionId);
+      return;
+    }
+    if (issue.page) {
+      requestAnimationFrame(() => {
+        const page = document.querySelector(`.page-wrap[data-page-number="${issue.page}"]`);
+        page?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    }
   }
 
   function approveSegmentation() {
@@ -2058,10 +2087,10 @@ function App() {
                     <summary>{liveApprovalIssues.length} issue{liveApprovalIssues.length === 1 ? '' : 's'} to fix before approval</summary>
                     <ul>{liveApprovalIssues.slice(0, 5).map((issue, index) => (
                       <li key={`${issue.message}-${index}`}>
-                        <button type="button" className={`issue-jump ${issue.regionId ? 'clickable' : ''}`} onClick={() => issue.regionId && jumpToQuestion(issue.regionId)} disabled={!issue.regionId}>
+                        <button type="button" className={`issue-jump ${issue.regionId || issue.lineId || issue.page ? 'clickable' : ''}`} onClick={() => jumpToIssue(issue)} disabled={!issue.regionId && !issue.lineId && !issue.page}>
                           <span>{issue.message}</span>
                           {!!issue.expectedLabels?.length && <small>Expected parts: {issue.expectedLabels.join(' · ')}</small>}
-                          {issue.regionId && <em>Go to {regions.find((region) => region.id === issue.regionId)?.label || 'question'} →</em>}
+                          {(issue.regionId || issue.lineId || issue.page) && <em>{issue.lineId ? `Go to problem on page ${issue.page || ''}` : issue.regionId ? `Go to ${regions.find((region) => region.id === issue.regionId)?.label || 'question'}` : `Go to page ${issue.page}`} →</em>}
                         </button>
                       </li>
                     ))}</ul>
@@ -2199,7 +2228,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
   }
 
   return (
-    <div className="page-wrap">
+    <div className="page-wrap" data-page-number={pageData.pageNumber}>
       <div className="page-label">Page {pageData.pageNumber}</div>
       <div ref={frameRef} className="page-frame" style={{ width: renderSize.width, height: frameHeight }} onClick={(e) => { if (!e.target.closest('.crop-line')) onAddLine(pageData.pageNumber, eventToYNorm(e), lineMode); }}>
         <canvas ref={canvasRef} style={{ top: canvasTop }} />
@@ -2220,7 +2249,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
         {lines.map((line) => {
           const yVisible = ((line.y - visibleTop) / visibleHeight) * 100;
           return (
-            <div key={line.id} className={`crop-line ${line.kind} ${line.source === 'suggested' ? 'suggested-line' : 'confirmed-line'} ${selectedLineId === line.id ? 'selected-line' : ''}`} style={{ top: `${yVisible}%` }}
+            <div key={line.id} data-line-id={line.id} className={`crop-line ${line.kind} ${line.source === 'suggested' ? 'suggested-line' : 'confirmed-line'} ${selectedLineId === line.id ? 'selected-line' : ''}`} style={{ top: `${yVisible}%` }}
               onClick={(e) => { e.stopPropagation(); onSelectLine(line.id); }} onPointerDown={(e) => { onSelectLine(line.id); beginDrag(e, line.id); }}
               onDoubleClick={(e) => { e.stopPropagation(); onRemoveLine(line.id); }} title="Click to select. Use Up/Down arrows for fine adjustment. Drag to move. Double-click or press Delete/Backspace to remove.">
               <span className="line-tag">{displayText(line)}</span>
