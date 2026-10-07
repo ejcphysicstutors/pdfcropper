@@ -1765,14 +1765,24 @@ function App() {
   function enterPreview() {
     if (!regions.length) return;
     const issues = validateSegmentation();
-    if (!segmentationApproved || issues.length) {
+    if (issues.length) {
       setApprovalIssues(issues);
-      setStatus(issues.length ? 'Fix the flagged segmentation issues and approve questions & parts before reviewing layout.' : 'Approve questions & parts before reviewing layout.');
+      setStatus('Fix the flagged question/part issues before reviewing page layout.');
       return;
+    }
+
+    // Entering Layout is itself the teacher's approval of the question/part
+    // structure. There is no reason to make them click Approve and then click
+    // Review page layout as a second confirmation of the same decision.
+    if (!segmentationApproved) {
+      const approvedAt = new Date().toISOString();
+      setSegmentationApproved(true);
+      setSegmentationApprovedAt(approvedAt);
+      setApprovalIssues([]);
     }
     setViewMode('preview');
     setSelectedLineId(null);
-    setStatus('Review the final layout. Purple page-break lines affect output only; source question boundaries stay unchanged.');
+    setStatus('Questions and parts approved. Review the final layout; purple page-break lines affect output only.');
   }
 
   return (
@@ -1920,7 +1930,7 @@ function App() {
                     {liveApprovalIssues.length > 5 && <small>+ {liveApprovalIssues.length - 5} more</small>}
                   </details>
                 )}
-                <button className={`${segmentationApproved ? 'primary' : 'ghost'} full`} onClick={enterPreview} disabled={!regions.length || !segmentationApproved}>Review page layout →</button>
+                <button className={`${segmentationApproved || liveApprovalIssues.length === 0 ? 'primary' : 'ghost'} full`} onClick={enterPreview} disabled={!regions.length}>Review page layout →</button>
               </section>
             </>
           ) : (
@@ -2428,6 +2438,58 @@ function buildCompactedStrip(strip, exclusions) {
   return { canvas: out, exclusions: normalized, originalToCompacted, compactedToOriginal, joinGapPx };
 }
 
+function moveBreakToAdjacentPart(strip, breaks, exclusions, selectedIndex, direction) {
+  if (!strip || selectedIndex == null || selectedIndex < 0 || selectedIndex >= (breaks || []).length) {
+    return { moved: false, breaks: breaks || [], warning: '' };
+  }
+
+  const normalizedExclusions = normalizeExclusions(exclusions || []);
+  const compacted = buildCompactedStrip(strip.canvas, normalizedExclusions);
+  const currentBreaks = [...(breaks || [])].sort((a, b) => a - b);
+  const current = currentBreaks[selectedIndex];
+  const previous = selectedIndex > 0 ? currentBreaks[selectedIndex - 1] : 0;
+  const next = selectedIndex < currentBreaks.length - 1 ? currentBreaks[selectedIndex + 1] : 1;
+
+  // Work from the compacted strip so a removed band near the end of a part
+  // does not make the fit calculation think the page is taller than it really
+  // is. Part starts that fall inside an excluded band are not useful snap
+  // targets and are ignored.
+  const candidates = (strip.partFractions || [])
+    .map((part) => part.fraction)
+    .filter((fraction) => !normalizedExclusions.some((range) => fraction > range.start && fraction < range.end))
+    .filter((fraction) => direction < 0
+      ? fraction > previous + 0.002 && fraction < current - 0.002
+      : fraction > current + 0.002 && fraction < next - 0.002)
+    .sort((a, b) => a - b);
+
+  const candidate = direction < 0 ? candidates[candidates.length - 1] : candidates[0];
+  if (candidate == null) {
+    return {
+      moved: false,
+      breaks: currentBreaks,
+      warning: direction < 0 ? 'There is no earlier question-part boundary for this page break.' : 'There is no later question-part boundary before the next page break.',
+    };
+  }
+
+  if (direction > 0) {
+    const pageHeight = PAGE_CONTENT_HEIGHT * (compacted.canvas.width / PAGE_CONTENT_WIDTH);
+    const previousCompacted = compacted.originalToCompacted(previous) * compacted.canvas.height;
+    const candidateCompacted = compacted.originalToCompacted(candidate) * compacted.canvas.height;
+    if (candidateCompacted - previousCompacted > pageHeight + 1) {
+      const part = (strip.partFractions || []).find((item) => Math.abs(item.fraction - candidate) < 0.0002);
+      return {
+        moved: false,
+        breaks: currentBreaks,
+        warning: `${part?.label || 'The next part'} will not fit completely on this A4 page. The break has not moved. If you want to split that part, drag the purple line manually to a suitable point inside the part.`,
+      };
+    }
+  }
+
+  const nextBreaks = [...currentBreaks];
+  nextBreaks[selectedIndex] = round4(candidate);
+  return { moved: true, breaks: nextBreaks.sort((a, b) => a - b), warning: '' };
+}
+
 function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, hasNext, onPrevious, onNext, currentIndex, totalCount, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, globalReviewTrim, onGlobalReviewTrimChange, trimOverrides, onTrimOverridesChange }) {
   const [strip, setStrip] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -2436,6 +2498,8 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   const [showExcludeHelp, setShowExcludeHelp] = useState(false);
   const [addBreakMode, setAddBreakMode] = useState(false);
   const [individualTrimMode, setIndividualTrimMode] = useState(false);
+  const [selectedBreakIndex, setSelectedBreakIndex] = useState(null);
+  const [breakWarning, setBreakWarning] = useState('');
 
   useEffect(() => {
     function onKeyDown(event) {
@@ -2449,6 +2513,11 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
+
+  useEffect(() => {
+    setSelectedBreakIndex(null);
+    setBreakWarning('');
+  }, [region?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2491,6 +2560,12 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   const finalPages = makeFinalPages(compacted.canvas, compactedBreaks);
   const sourcePages = [];
   for (let page = region.start.page; page <= region.end.page; page += 1) sourcePages.push(page);
+
+  function moveSelectedBreak(direction) {
+    const result = moveBreakToAdjacentPart(strip, effectiveOriginalBreaks, savedExclusions, selectedBreakIndex, direction);
+    setBreakWarning(result.warning || '');
+    if (result.moved) onBreaksChange(result.breaks);
+  }
 
   function updateGlobalTrim(field, valuePct) {
     const value = clamp(Number(valuePct) / 100, 0, 0.12);
@@ -2558,15 +2633,19 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
             <div><p className="eyebrow">Layout · {currentIndex + 1} of {totalCount}</p><h2>{region.label}</h2></div>
             <button type="button" className="ghost compact" onClick={onNext} disabled={!hasNext} aria-label="Next question" title="Next question" style={{ minWidth: 38, fontSize: '1.2rem', lineHeight: 1 }}>→</button>
           </div>
-          <p>Use ← / → to review adjacent questions. Drag purple page breaks. Use <strong>X</strong> to remove unwanted blank space.</p>
+          <p>Use ← / → to review questions. Click a purple break, then use ↑ / ↓ to jump to the previous/next part boundary; drag it manually to split a part.</p>
         </div>
         <div className="preview-actions">
           <button className={`ghost compact ${excludeMode ? 'active-tool' : ''}`} onClick={() => { setExcludeMode((value) => !value); setAddBreakMode(false); }}>Remove blank space <kbd>X</kbd></button>
           <button className="ghost compact" onClick={() => setShowExcludeHelp((value) => !value)} aria-expanded={showExcludeHelp}>{showExcludeHelp ? 'Hide removal help' : 'How to remove space'}</button>
           <button className={`ghost compact ${addBreakMode ? 'active-tool' : ''}`} onClick={() => { setAddBreakMode((value) => !value); setExcludeMode(false); }}>{addBreakMode ? 'Click crop to place break' : '+ Add page break'}</button>
-          <button className="ghost compact" onClick={() => { onBreaksChange(autoBreaks); setAddBreakMode(false); }}>Reset smart breaks</button>
+          {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(-1)} title="Move selected page break to the previous part boundary">↑ Previous part</button>}
+          {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(1)} title="Move selected page break to the next part boundary">↓ Next part</button>}
+          <button className="ghost compact" onClick={() => { onBreaksChange(autoBreaks); setAddBreakMode(false); setSelectedBreakIndex(null); setBreakWarning(''); }}>Reset smart breaks</button>
         </div>
       </div>
+
+      {breakWarning && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Page fit warning:</strong> {breakWarning}</div>}
 
       {showExcludeHelp && <div style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #cfd8e6', borderRadius: 10, background: '#fff', color: '#43516a', fontSize: '.82rem', lineHeight: 1.45 }}>
         <strong style={{ color: '#24324a' }}>Remove blank space:</strong> click <strong>Remove blank space</strong> (or press <kbd>X</kbd>), then drag vertically across the unwanted band in <strong>Edit crop</strong>. Double-click a grey <strong>EXCLUDED</strong> band to restore it.
@@ -2612,7 +2691,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       <div className="preview-grid">
         <div className="layout-editor-panel">
           <div className="panel-heading compact-panel-heading"><div><h3>Edit crop</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : addBreakMode ? 'Click where the new page should end; it will snap to a nearby part boundary.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} removed</span></div>
-          <StripBreakEditor strip={strip} breaks={effectiveOriginalBreaks} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} addBreakMode={addBreakMode} onAddBreakComplete={() => setAddBreakMode(false)} />
+          <StripBreakEditor strip={strip} breaks={effectiveOriginalBreaks} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} addBreakMode={addBreakMode} onAddBreakComplete={() => setAddBreakMode(false)} selectedBreakIndex={selectedBreakIndex} onSelectBreak={setSelectedBreakIndex} onBreakWarning={setBreakWarning} />
         </div>
         <div className="final-pages-panel">
           <div className="panel-heading compact-panel-heading"><div><h3>Output preview</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div></div>
@@ -2625,9 +2704,25 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   );
 }
 
-function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusionsChange, excludeMode, addBreakMode, onAddBreakComplete }) {
+function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusionsChange, excludeMode, addBreakMode, onAddBreakComplete, selectedBreakIndex, onSelectBreak, onBreakWarning }) {
   const containerRef = useRef(null);
   const [draftExclude, setDraftExclude] = useState(null);
+
+  useEffect(() => {
+    if (selectedBreakIndex == null) return undefined;
+    function onKeyDown(event) {
+      const tag = event.target?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || event.target?.isContentEditable || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      const direction = event.key === 'ArrowUp' ? -1 : 1;
+      const result = moveBreakToAdjacentPart(strip, breaks, exclusions, selectedBreakIndex, direction);
+      onBreakWarning?.(result.warning || '');
+      if (result.moved) onBreaksChange(result.breaks);
+      event.preventDefault();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [strip, breaks, exclusions, selectedBreakIndex, onBreaksChange, onBreakWarning]);
 
   function fractionFromEvent(event) {
     const rect = containerRef.current.getBoundingClientRect();
@@ -2664,6 +2759,7 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
   }
 
   function updateBreak(index, event) {
+    onBreakWarning?.('');
     let fraction = clamp(fractionFromEvent(event), 0.02, 0.98);
     fraction = snapBreakFraction(fraction, 0.03);
     const previous = index > 0 ? breaks[index - 1] : 0;
@@ -2682,6 +2778,8 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
 
   function beginBreakDrag(event, index) {
     event.preventDefault(); event.stopPropagation();
+    onSelectBreak?.(index);
+    onBreakWarning?.('');
     const target = event.currentTarget;
     const pointerId = event.pointerId;
     target.setPointerCapture(pointerId);
@@ -2728,8 +2826,8 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
       ))}
       {draftExclude && <div className="excluded-band draft" style={{ top: `${draftTop * 100}%`, height: `${draftHeight * 100}%` }}><span>Exclude this gap</span></div>}
       {breaks.map((fraction, index) => (
-        <div key={`break-${index}`} className="page-break-line" style={{ top: `${fraction * 100}%` }} onPointerDown={(event) => beginBreakDrag(event, index)}>
-          <span>PAGE {index + 1} END ↕</span>
+        <div key={`break-${index}`} className={`page-break-line ${selectedBreakIndex === index ? 'selected' : ''}`} style={{ top: `${fraction * 100}%`, filter: selectedBreakIndex === index ? 'drop-shadow(0 0 4px rgba(87, 42, 220, .65))' : undefined }} onPointerDown={(event) => beginBreakDrag(event, index)} title="Click to select. Use ↑ / ↓ to jump to adjacent part boundaries, or drag to split a part manually.">
+          <span>PAGE {index + 1} END {selectedBreakIndex === index ? '· selected' : '↕'}</span>
         </div>
       ))}
     </div>
