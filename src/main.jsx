@@ -262,6 +262,7 @@ function App() {
   const [workflowKind, setWorkflowKind] = useState('questions');
   const [questionPayload, setQuestionPayload] = useState(null);
   const [solutionPayload, setSolutionPayload] = useState(null);
+  const [solutionJsonSaved, setSolutionJsonSaved] = useState(false);
   const fileInputRef = useRef(null);
   const restoringDraftRef = useRef(false);
   const [resumeDraft, setResumeDraft] = useState(null);
@@ -293,7 +294,7 @@ function App() {
     showGuides, selectedQuestionId, selectedLineId, selectedSegmentId,
     segmentLabelOverrides, segmentPartFlags, lastSuggestionIds, viewMode, outputBreaks,
     exclusions, trimOverrides, globalReviewTrim, segmentationApproved,
-    segmentationApprovedAt, approvalIssues, questionPayload, solutionPayload,
+    segmentationApprovedAt, approvalIssues, questionPayload, solutionPayload, solutionJsonSaved,
   ]);
 
   useEffect(() => {
@@ -366,6 +367,7 @@ function App() {
     setExclusions({});
     setTrimOverrides({});
     setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]);
+    if (!restoreSnapshot) setSolutionJsonSaved(false);
     setViewMode('segment');
 
     try {
@@ -405,6 +407,7 @@ function App() {
         setApprovalIssues(Array.isArray(restoreSnapshot.approvalIssues) ? restoreSnapshot.approvalIssues : []);
         setQuestionPayload(restoreSnapshot.questionPayload || null);
         setSolutionPayload(restoreSnapshot.solutionPayload || null);
+        setSolutionJsonSaved(Boolean(restoreSnapshot.solutionJsonSaved));
         setLastLocalSaveAt(restoreSnapshot.savedAt || null);
         setStatus(`Restored local work from ${new Date(restoreSnapshot.savedAt || Date.now()).toLocaleString()}. Continue from where you left off.`);
       } else {
@@ -451,6 +454,7 @@ function App() {
       approvalIssues,
       questionPayload,
       solutionPayload,
+      solutionJsonSaved,
     };
   }
 
@@ -616,6 +620,7 @@ function App() {
       approvalIssues: [],
       questionPayload: questionAuthority,
       solutionPayload: solutionPayloadForSnapshot,
+      solutionJsonSaved: false,
       savedAt: new Date().toISOString(),
     };
   }
@@ -1254,6 +1259,7 @@ function App() {
     const base = file.name.replace(/\.pdf$/i, '');
     if (workflowKind === 'solutions') {
       setSolutionPayload(payload);
+      setSolutionJsonSaved(true);
       downloadJson(payload, `${base}.solutions.json`);
       setStatus('Solution JSON saved and matched to the approved question list. You can now download the combined package.');
     } else {
@@ -1270,6 +1276,7 @@ function App() {
     setQuestionPayload(payload);
     setWorkflowKind('solutions');
     setSolutionPayload(null);
+    setSolutionJsonSaved(false);
     setFile(null);
     setPdf(null);
     setPages([]);
@@ -1286,6 +1293,33 @@ function App() {
     setApprovalIssues([]);
     setViewMode('segment');
     setStatus(`Question JSON retained in this browser session. Choose the solution PDF; ${payload.questions.length} parent questions must reconcile exactly.`);
+    setTimeout(() => fileInputRef.current?.click(), 0);
+  }
+
+  function uploadAnotherPaper() {
+    setWorkflowKind('questions');
+    setQuestionPayload(null);
+    setSolutionPayload(null);
+    setSolutionJsonSaved(false);
+    setFile(null);
+    setPdf(null);
+    setPages([]);
+    setLines([]);
+    setLastSuggestionIds([]);
+    setSelectedQuestionId(null);
+    setSelectedLineId(null);
+    setSelectedSegmentId(null);
+    setSegmentLabelOverrides({});
+    setSegmentPartFlags({});
+    setOutputBreaks({});
+    setExclusions({});
+    setTrimOverrides({});
+    setGlobalReviewTrim({ topExtra: 0, bottomExtra: 0 });
+    setSegmentationApproved(false);
+    setSegmentationApprovedAt(null);
+    setApprovalIssues([]);
+    setViewMode('segment');
+    setStatus('Choose the next paper to begin.');
     setTimeout(() => fileInputRef.current?.click(), 0);
   }
 
@@ -1520,7 +1554,7 @@ function App() {
           <p className="subtitle">{workflowKind === 'solutions' ? `Match the solution file to the ${questionPayload?.questions?.length || 0} approved question parents, then review the solution crops.` : 'Prepare the paper, check questions and parts, then review worksheet pages.'}</p>
         </div>
         {file && lastLocalSaveAt && <div style={{ marginLeft: 'auto', marginRight: '12px', alignSelf: 'center', fontSize: '0.78rem', color: '#667085', whiteSpace: 'nowrap' }}>Saved locally {new Date(lastLocalSaveAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>}
-        {file && <button className="primary" onClick={() => fileInputRef.current?.click()} disabled={loading}>Change {workflowKind === 'solutions' ? 'solution' : 'files'}</button>}
+        {file && <button className="primary" onClick={workflowKind === 'solutions' && solutionJsonSaved ? uploadAnotherPaper : () => fileInputRef.current?.click()} disabled={loading}>{workflowKind === 'solutions' && solutionJsonSaved ? 'Upload another paper' : `Change ${workflowKind === 'solutions' ? 'solution' : 'files'}`}</button>}
         <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf,application/json,.json" multiple onChange={(e) => handleIntakeFiles(e.target.files)} />
       </header>
 
