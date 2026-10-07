@@ -1003,7 +1003,7 @@ function App() {
         if (!marker) continue;
         parts.push({
           page: pageData.pageNumber,
-          y: round4(Math.max(top + 0.004, row.yNorm - 0.009)),
+          y: round4(Math.max(top + 0.004, row.yNorm - 0.014)),
           raw: marker.raw,
           printedText: marker.printedText,
           questionNumber: marker.questionNumber ?? null,
