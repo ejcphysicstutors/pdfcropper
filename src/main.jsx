@@ -493,13 +493,137 @@ function App() {
     setStatus('Choose a PDF to begin.');
   }
 
-  async function parseQuestionJson(selected) {
+  async function parseSegmentationJson(selected) {
     const text = await selected.text();
     const payload = JSON.parse(text);
     const questions = Array.isArray(payload?.questions) ? payload.questions : [];
-    const isQuestionJson = payload?.documentType === 'question-segmentation' || payload?.schemaVersion === 4;
-    if (!isQuestionJson || !questions.length) throw new Error('not-question-segmentation');
-    return payload;
+    const documentType = payload?.documentType;
+    const isQuestionJson = documentType === 'question-segmentation' || (payload?.schemaVersion === 4 && documentType !== 'solution-segmentation');
+    const isSolutionJson = documentType === 'solution-segmentation';
+    if ((!isQuestionJson && !isSolutionJson) || !questions.length) throw new Error('not-segmentation-json');
+    return { payload, kind: isSolutionJson ? 'solutions' : 'questions' };
+  }
+
+  function normaliseSourceName(name) {
+    return String(name || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\\/g, '/')
+      .split('/').pop()
+      .replace(/\s+/g, ' ');
+  }
+
+  function pdfMatchesSegmentationSource(pdfFile, payload) {
+    const pdfName = normaliseSourceName(pdfFile?.name);
+    const sourceName = normaliseSourceName(payload?.sourceFile);
+    return Boolean(pdfName && sourceName && pdfName === sourceName);
+  }
+
+  function snapshotFromSegmentationPayload(payload, kind) {
+    const importedLines = (payload?.lines || []).map((line) => ({
+      id: makeId(line.type || START),
+      page: Number(line.page),
+      y: Number(line.yFractionFromTop),
+      kind: line.type,
+      label: line.label || '',
+      manualLabel: Boolean(line.labelEditedByUser),
+      source: line.source || 'imported-json',
+    })).filter((line) => Number.isFinite(line.page) && Number.isFinite(line.y) && [START, END, PART].includes(line.kind));
+
+    const lineAt = (page, y, kinds) => importedLines.find((line) =>
+      kinds.includes(line.kind)
+      && line.page === Number(page)
+      && Math.abs(line.y - Number(y)) < 0.0025
+    );
+
+    const segmentLabelOverrides = {};
+    const segmentPartFlags = {};
+    const outputBreaks = {};
+    const exclusions = {};
+    const trimOverrides = {};
+
+    for (const question of payload?.questions || []) {
+      const startLine = lineAt(question?.start?.page, question?.start?.yFractionFromTop, [START]);
+      if (!startLine) continue;
+      const regionId = startLine.id;
+      outputBreaks[regionId] = Array.isArray(question.outputPageBreakFractions) ? question.outputPageBreakFractions : [];
+      exclusions[regionId] = Array.isArray(question.excludedOutputRanges) ? question.excludedOutputRanges : [];
+      const perPageTrim = {};
+      for (const trim of question.pageTrimOverrides || []) {
+        perPageTrim[Number(trim.page)] = {
+          topExtra: Number(trim.extraTopFraction || 0),
+          bottomExtra: Number(trim.extraBottomFraction || 0),
+        };
+      }
+      trimOverrides[regionId] = perPageTrim;
+
+      for (const segment of question.segments || []) {
+        const boundary = lineAt(segment?.start?.page, segment?.start?.yFractionFromTop, [START, PART]);
+        if (!boundary) continue;
+        if (segment.label) segmentLabelOverrides[boundary.id] = segment.label;
+        if (segment.isPart === false) segmentPartFlags[boundary.id] = false;
+      }
+    }
+
+    let questionAuthority = null;
+    let solutionPayloadForSnapshot = null;
+    if (kind === 'solutions') {
+      // A saved solution JSON may be reopened without its original question JSON.
+      // Reconstruct the minimum parent/part authority needed for editing from the
+      // saved solution itself; the existing labels remain visible and editable.
+      questionAuthority = {
+        schemaVersion: 4,
+        documentType: 'question-segmentation',
+        sourceFile: payload?.sourceQuestionFile || null,
+        questions: (payload?.questions || []).map((question, index) => ({
+          label: question.questionRef || question.label || payload?.expectedQuestionLabels?.[index] || `Q${index + 1}`,
+          segments: (question.segments || []).filter((segment) => segment.isPart !== false).map((segment) => ({
+            label: segment.label,
+            detectedMarker: segment.detectedMarker || null,
+            labelEditedByUser: Boolean(segment.labelEditedByUser),
+            isPart: segment.isPart !== false,
+          })),
+        })),
+      };
+      solutionPayloadForSnapshot = payload;
+    }
+
+    return {
+      workflowKind: kind,
+      headerPct: Number.isFinite(Number(payload?.headerFraction)) ? Number(payload.headerFraction) * 100 : 6,
+      footerPct: Number.isFinite(Number(payload?.footerFraction)) ? Number(payload.footerFraction) * 100 : 6,
+      lines: importedLines.sort(comparePos),
+      lineMode: START,
+      showGuides: true,
+      selectedQuestionId: importedLines.find((line) => line.kind === START)?.id || null,
+      selectedLineId: null,
+      selectedSegmentId: null,
+      segmentLabelOverrides,
+      segmentPartFlags,
+      lastSuggestionIds: [],
+      viewMode: 'segment',
+      outputBreaks,
+      exclusions,
+      trimOverrides,
+      globalReviewTrim: {
+        topExtra: Number(payload?.globalReviewTrim?.extraTopFraction || 0),
+        bottomExtra: Number(payload?.globalReviewTrim?.extraBottomFraction || 0),
+      },
+      // Imported JSON is deliberately reopened for review/editing. Require one
+      // fresh approval before the revised JSON is saved.
+      segmentationApproved: false,
+      segmentationApprovedAt: null,
+      approvalIssues: [],
+      questionPayload: questionAuthority,
+      solutionPayload: solutionPayloadForSnapshot,
+      savedAt: new Date().toISOString(),
+    };
+  }
+
+  async function parseQuestionJson(selected) {
+    const parsed = await parseSegmentationJson(selected);
+    if (parsed.kind !== 'questions') throw new Error('not-question-segmentation');
+    return parsed.payload;
   }
 
   function resetForSolutionIntake(payload) {
@@ -536,7 +660,11 @@ function App() {
     try {
       // Normal start: one paper PDF means a new question-paper crop.
       if (selected.length === 1 && pdfFiles.length === 1) {
-        if (workflowKind === 'solutions' && questionPayload) {
+        if (workflowKind === 'solutions' && solutionPayload?.documentType === 'solution-segmentation') {
+          const snapshot = snapshotFromSegmentationPayload(solutionPayload, 'solutions');
+          await openPdf(pdfFiles[0], 'solutions', snapshot);
+          setStatus('Solution boundaries loaded from the saved JSON. Adjust them as needed, approve again, then save a revised solution JSON.');
+        } else if (workflowKind === 'solutions' && questionPayload) {
           await openPdf(pdfFiles[0], 'solutions');
         } else {
           setWorkflowKind('questions');
@@ -547,29 +675,66 @@ function App() {
         return;
       }
 
-      // Resume automatically: select the saved question JSON and the matching
-      // solution PDF in the same file-picker action. No separate mode choice.
+      // PDF + segmentation JSON can mean either "reopen this exact document for
+      // boundary edits" or "question JSON + a different PDF = continue with
+      // solutions". Use document type plus source filename to decide.
       if (selected.length === 2 && pdfFiles.length === 1 && jsonFiles.length === 1) {
-        const payload = await parseQuestionJson(jsonFiles[0]);
+        const parsed = await parseSegmentationJson(jsonFiles[0]);
+        const payload = parsed.payload;
+        const sourceMatches = pdfMatchesSegmentationSource(pdfFiles[0], payload);
+
+        if (parsed.kind === 'solutions') {
+          if (!sourceMatches) {
+            setStatus(`This solution JSON was saved for ${payload.sourceFile || 'a different solution PDF'}. Please pair it with that solution file so the stored boundaries map to the correct pages.`);
+            return;
+          }
+          const snapshot = snapshotFromSegmentationPayload(payload, 'solutions');
+          setStatus('Solution JSON recognised. Reopening its saved boundaries for adjustment…');
+          await openPdf(pdfFiles[0], 'solutions', snapshot);
+          setStatus('Solution boundaries loaded from the JSON. Adjust them as needed, approve again, then save a revised solution JSON.');
+          return;
+        }
+
+        if (sourceMatches) {
+          const snapshot = snapshotFromSegmentationPayload(payload, 'questions');
+          setQuestionPayload(null);
+          setSolutionPayload(null);
+          setStatus('Question JSON matches this question paper. Reopening its saved boundaries for adjustment…');
+          await openPdf(pdfFiles[0], 'questions', snapshot);
+          setStatus('Question boundaries loaded from the JSON. Adjust them as needed, approve again, then save a revised question JSON.');
+          return;
+        }
+
+        // A question JSON paired with a different PDF is the normal continuation
+        // workflow: the other PDF is assumed to be the solution document.
         const count = resetForSolutionIntake(payload);
-        setStatus(`Question JSON recognised. Loading the solution PDF and reconciling it against ${count} parent questions…`);
+        setStatus(`Question JSON recognised. Loading the other PDF as the solution and reconciling it against ${count} parent questions…`);
         await openPdf(pdfFiles[0], 'solutions');
         return;
       }
 
-      // Keep JSON-only intake as a graceful fallback if the solution has not
-      // been selected yet; the next single PDF chosen is treated as the solution.
+      // JSON-only intake remains useful when the second file is not yet ready.
+      // Question JSON waits for a solution PDF; solution JSON waits for its own
+      // solution PDF so the saved solution boundaries can be reopened.
       if (selected.length === 1 && jsonFiles.length === 1) {
-        const payload = await parseQuestionJson(jsonFiles[0]);
-        const count = resetForSolutionIntake(payload);
-        setStatus(`Question JSON loaded. Choose the matching solution PDF; ${count} parent questions will be reconciled against it.`);
+        const parsed = await parseSegmentationJson(jsonFiles[0]);
+        if (parsed.kind === 'solutions') {
+          setSolutionPayload(parsed.payload);
+          setQuestionPayload(null);
+          setWorkflowKind('solutions');
+          setFile(null); setPdf(null); setPages([]); setLines([]);
+          setStatus('Solution JSON loaded. Now choose its matching solution PDF to reopen the saved boundaries.');
+        } else {
+          const count = resetForSolutionIntake(parsed.payload);
+          setStatus(`Question JSON loaded. Choose the matching solution PDF; ${count} parent questions will be reconciled against it.`);
+        }
         return;
       }
 
-      setStatus('Choose either one question-paper PDF, or exactly two files together: the saved question JSON plus its solution PDF.');
+      setStatus('Choose one PDF to start fresh, or pair a PDF with its saved segmentation JSON to reopen existing boundaries. A question JSON paired with a different PDF continues into solution cropping.');
     } catch (error) {
       console.error(error);
-      setStatus('Could not recognise that intake. Use one question-paper PDF, or select the saved question JSON and matching solution PDF together.');
+      setStatus('Could not recognise that intake. Use one PDF to start fresh, or upload a PDF together with its saved question/solution segmentation JSON.');
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
