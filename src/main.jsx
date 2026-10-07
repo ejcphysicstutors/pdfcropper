@@ -13,11 +13,12 @@ const END = 'question-end';
 const PART = 'part';
 const PAGE_CONTENT_WIDTH = 706;
 const PAGE_CONTENT_HEIGHT = 1035;
-const APP_VERSION = '0.9.1-trial';
+const APP_VERSION = '0.9.2-trial';
 
 const LOCAL_DRAFT_DB = 'prelim-cropper-local-v1';
 const LOCAL_DRAFT_STORE = 'drafts';
 const LOCAL_DRAFT_KEY = 'active-work';
+const LOCAL_DRAFT_SOURCE_KEY = 'active-source';
 
 function openDraftDb() {
   return new Promise((resolve, reject) => {
@@ -36,9 +37,17 @@ async function readLocalDraft() {
   try {
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(LOCAL_DRAFT_STORE, 'readonly');
-      const request = tx.objectStore(LOCAL_DRAFT_STORE).get(LOCAL_DRAFT_KEY);
-      request.onsuccess = () => resolve(request.result || null);
-      request.onerror = () => reject(request.error);
+      const store = tx.objectStore(LOCAL_DRAFT_STORE);
+      const draftRequest = store.get(LOCAL_DRAFT_KEY);
+      const sourceRequest = store.get(LOCAL_DRAFT_SOURCE_KEY);
+      tx.oncomplete = () => {
+        const draft = draftRequest.result || null;
+        const source = sourceRequest.result || null;
+        if (!draft) { resolve(null); return; }
+        resolve({ ...draft, fileBlob: source?.fileBlob || draft.fileBlob || null });
+      };
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
   } finally {
     db.close();
@@ -50,7 +59,29 @@ async function writeLocalDraft(draft) {
   try {
     await new Promise((resolve, reject) => {
       const tx = db.transaction(LOCAL_DRAFT_STORE, 'readwrite');
-      tx.objectStore(LOCAL_DRAFT_STORE).put({ ...draft, id: LOCAL_DRAFT_KEY });
+      const store = tx.objectStore(LOCAL_DRAFT_STORE);
+      const { fileBlob, ...lightweightDraft } = draft;
+      store.put({ ...lightweightDraft, id: LOCAL_DRAFT_KEY });
+
+      // Keep the large source PDF in a separate record and rewrite it only when
+      // the actual source file changes. Frequent autosaves then update only the
+      // lightweight boundary/layout state rather than copying the PDF blob.
+      if (fileBlob) {
+        const sourceSignature = `${draft.fileName || ''}|${fileBlob.size || 0}|${draft.fileLastModified || 0}`;
+        const currentSource = store.get(LOCAL_DRAFT_SOURCE_KEY);
+        currentSource.onsuccess = () => {
+          if (currentSource.result?.sourceSignature !== sourceSignature) {
+            store.put({
+              id: LOCAL_DRAFT_SOURCE_KEY,
+              sourceSignature,
+              fileBlob,
+              fileName: draft.fileName,
+              fileType: draft.fileType,
+              fileLastModified: draft.fileLastModified || 0,
+            });
+          }
+        };
+      }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
@@ -65,7 +96,9 @@ async function clearLocalDraft() {
   try {
     await new Promise((resolve, reject) => {
       const tx = db.transaction(LOCAL_DRAFT_STORE, 'readwrite');
-      tx.objectStore(LOCAL_DRAFT_STORE).delete(LOCAL_DRAFT_KEY);
+      const store = tx.objectStore(LOCAL_DRAFT_STORE);
+      store.delete(LOCAL_DRAFT_KEY);
+      store.delete(LOCAL_DRAFT_SOURCE_KEY);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
@@ -614,6 +647,7 @@ function App() {
       fileBlob: file,
       fileName: file.name,
       fileType: file.type || 'application/pdf',
+      fileLastModified: file.lastModified || 0,
       workflowKind,
       headerPct,
       footerPct,
@@ -967,7 +1001,15 @@ function App() {
       setStatus('Opened the PDF as a renamed question paper. Verify that the saved boundaries align before approval.');
       return;
     }
-    const count = resetForSolutionIntake(pending.payload);
+    // Keep the current document intact until the mismatched solution PDF has
+    // successfully loaded. This route must be just as atomic as the normal
+    // “Continue with solutions” hand-off.
+    const count = Array.isArray(pending.payload?.questions) ? pending.payload.questions.length : 0;
+    questionAuthorityRef.current = pending.payload;
+    setQuestionPayload(pending.payload);
+    setAwaitingSolutionPdf(false);
+    setSolutionPayload(null);
+    setSolutionJsonSaved(false);
     await openPdf(pending.pdfFile, 'solutions', null, pending.payload);
     setStatus(`Loaded the PDF as the solution and will reconcile it against ${count} parent questions.`);
   }
@@ -1434,7 +1476,7 @@ function App() {
     setApprovalIssues([]);
   }, [lines, headerPct, footerPct, segmentLabelOverrides, segmentPartFlags]);
 
-  function buildSegmentationPayload(documentKind = workflowKind) {
+  function buildSegmentationPayload(documentKind = workflowKind, approvalOverride = null) {
     if (!file || !pages.length) return null;
     const isSolution = documentKind === 'solutions';
     return {
@@ -1469,8 +1511,8 @@ function App() {
         pageTrimOverrides: Object.entries(trimOverrides[region.id] || {}).map(([page, trim]) => ({ page: Number(page), extraTopFraction: round4(trim.topExtra || 0), extraBottomFraction: round4(trim.bottomExtra || 0) })),
       })),
       segmentationApproval: {
-        approved: segmentationApproved,
-        approvedAt: segmentationApprovedAt,
+        approved: approvalOverride?.approved ?? segmentationApproved,
+        approvedAt: approvalOverride?.approvedAt ?? segmentationApprovedAt,
         structuralIssueCount: validateSegmentation().length,
       },
       lines: [...lines].sort(comparePos).map((line) => ({
@@ -1506,12 +1548,27 @@ function App() {
   function exportSegmentation() {
     if (!file || !pages.length) return;
     const issues = validateSegmentation();
-    if (!segmentationApproved || issues.length) {
+    if (issues.length) {
       setApprovalIssues(issues);
-      setStatus(issues.length ? 'Cannot save yet. Fix the flagged segmentation issues, then approve questions & parts.' : 'Approve questions & parts before saving.');
+      setStatus('Cannot save yet. Fix the flagged segmentation issues first.');
       return;
     }
-    const payload = buildSegmentationPayload();
+
+    // Reaching Layout review means the teacher has accepted the question/part
+    // structure. Saving from Layout must never force them back to the Check step.
+    let approvalOverride = null;
+    if (!segmentationApproved && viewMode === 'preview') {
+      const approvedAt = new Date().toISOString();
+      approvalOverride = { approved: true, approvedAt };
+      setSegmentationApproved(true);
+      setSegmentationApprovedAt(approvedAt);
+      setApprovalIssues([]);
+    } else if (!segmentationApproved) {
+      setStatus('Review page layout first; entering Layout approves the question/part structure.');
+      return;
+    }
+
+    const payload = buildSegmentationPayload(workflowKind, approvalOverride);
     if (!payload) return;
     const base = file.name.replace(/\.pdf$/i, '');
     if (workflowKind === 'solutions') {
@@ -1855,7 +1912,7 @@ function App() {
     }
     setViewMode('preview');
     setSelectedLineId(null);
-    setStatus('Questions and parts approved. Review the final layout; purple page-break lines affect output only.');
+    setStatus(workflowKind === 'solutions' ? 'Solution matches approved. Review the final layout; purple page-break lines affect output only.' : 'Questions and parts approved. Review the final layout; purple page-break lines affect output only.');
   }
 
   return (
@@ -2011,9 +2068,9 @@ function App() {
               <section className="compact-section"><button className="ghost full" onClick={() => setViewMode('segment')}>← Back to questions</button></section>
               <section className="compact-section"><div className="section-heading-row"><h2>{workflowKind === 'solutions' ? 'Solution parents' : 'Questions'}</h2><span className="review-count">{reviewedRegionIds.length}/{regions.length} viewed</span></div><div className="region-list preview-region-list">{regions.map((region) => { const visited = reviewedRegionIds.includes(region.id); const current = selectedQuestionId === region.id; return <button key={region.id} className={`region-row ${current ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}><span className="region-name">{region.label}</span><span className={`visit-state ${current ? 'current' : visited ? 'visited' : ''}`}>{current ? '●' : visited ? '✓' : '○'}</span></button>; })}</div></section>
               <section className="compact-section save-section">
-                <button className="primary full" onClick={exportSegmentation} disabled={!segmentationApproved}>{workflowKind === 'solutions' ? 'Save solution JSON' : 'Save question JSON'}</button>
+                <button className="primary full" onClick={exportSegmentation} disabled={liveApprovalIssues.length > 0}>{workflowKind === 'solutions' ? 'Save solution JSON' : 'Save question JSON'}</button>
                 <p className="small">Saves the approved source boundaries and reviewed page layout.</p>
-                {workflowKind === 'questions' && questionPayload && segmentationApproved && <div className="completion-card"><strong>✓ Question JSON saved</strong><span>{questionPayload.sourceFile || file?.name}</span><button className="ghost full" type="button" onClick={continueWithSolutions}>{awaitingSolutionPdf ? 'Choose solution PDF…' : 'Continue with solutions →'}</button><button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
+                {workflowKind === 'questions' && questionPayload && <div className="completion-card"><strong>✓ Question JSON saved</strong><span>{questionPayload.sourceFile || file?.name}</span><button className="ghost full" type="button" onClick={continueWithSolutions}>{awaitingSolutionPdf ? 'Choose solution PDF…' : 'Continue with solutions →'}</button><button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
                 {workflowKind === 'solutions' && solutionJsonSaved && <div className="completion-card"><strong>✓ Solution JSON saved</strong><span>{solutionPayload?.sourceFile || file?.name}</span>{questionPayload && solutionPayload && <button className="ghost full" type="button" onClick={downloadCombinedPackage}>Download both JSONs</button>}<button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
               </section>
             </>
