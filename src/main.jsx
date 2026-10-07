@@ -2793,6 +2793,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
 
   return (
     <div className="preview-review-workspace">
+      <div className="layout-sticky-controls">
       <div className="preview-toolbar compact-preview-toolbar">
         <div className="preview-title-row">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -2811,12 +2812,6 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
           <button className="ghost compact" onClick={() => { onBreaksChange(autoBreaks); setAddBreakMode(false); setSelectedBreakIndex(null); setBreakWarning(''); }}>Reset smart breaks</button>
         </div>
       </div>
-
-      {breakWarning && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Page fit warning:</strong> {breakWarning}</div>}
-
-      {showExcludeHelp && <div style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #cfd8e6', borderRadius: 10, background: '#fff', color: '#43516a', fontSize: '.82rem', lineHeight: 1.45 }}>
-        <strong style={{ color: '#24324a' }}>Remove blank space:</strong> click <strong>Remove blank space</strong> (or press <kbd>X</kbd>), then drag vertically across the unwanted band in <strong>Edit crop</strong>. Double-click a grey <strong>EXCLUDED</strong> band to restore it.
-      </div>}
 
       <details className="review-trim-card compact-trim-card">
         <summary>
@@ -2854,6 +2849,13 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
           )}
         </div>
       </details>
+      </div>
+
+      {breakWarning && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Page fit warning:</strong> {breakWarning}</div>}
+
+      {showExcludeHelp && <div style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #cfd8e6', borderRadius: 10, background: '#fff', color: '#43516a', fontSize: '.82rem', lineHeight: 1.45 }}>
+        <strong style={{ color: '#24324a' }}>Remove blank space:</strong> click <strong>Remove blank space</strong> (or press <kbd>X</kbd>), then drag vertically across the unwanted band in <strong>Edit crop</strong>. Double-click a grey <strong>EXCLUDED</strong> band to restore it.
+      </div>}
 
       <div className="preview-grid">
         <div className="layout-editor-panel">
