@@ -2245,6 +2245,75 @@ function automaticBreaks(stripWidth, stripHeight, partFractions) {
   return breaks;
 }
 
+function normalizeBreaksForPageCapacity(stripWidth, stripHeight, partFractions, requestedBreaks) {
+  const pageHeight = PAGE_CONTENT_HEIGHT * (stripWidth / PAGE_CONTENT_WIDTH);
+  if (stripHeight <= pageHeight + 1) return [];
+
+  const boundaryYs = [...new Set(
+    (partFractions || [])
+      .map((part) => clamp(Number(part.fraction) || 0, 0, 1) * stripHeight)
+      .filter((value) => value > 8 && value < stripHeight - 8)
+      .map((value) => Math.round(value))
+  )].sort((a, b) => a - b);
+
+  const requestedYs = [...new Set(
+    (requestedBreaks || [])
+      .map((fraction) => clamp(Number(fraction) || 0, 0.001, 0.999) * stripHeight)
+      .map((value) => Math.round(value))
+  )].sort((a, b) => a - b);
+
+  function safeBreakBefore(current, target) {
+    const candidates = boundaryYs.filter((y) => y > current + 8 && y <= target + 1);
+    if (!candidates.length) return target;
+
+    // Prefer the latest part boundary that fits before the physical page end.
+    // If the part beginning there is itself taller than a page, splitting that
+    // oversized part is unavoidable, so use the physical page limit instead.
+    const candidate = candidates[candidates.length - 1];
+    const nextBoundary = boundaryYs.find((y) => y > candidate + 1) ?? stripHeight;
+    if (nextBoundary - candidate <= pageHeight + 1) return candidate;
+    return target;
+  }
+
+  const result = [];
+  let current = 0;
+  let requestIndex = 0;
+  let guard = 0;
+
+  while (current + pageHeight < stripHeight - 1 && guard < 300) {
+    guard += 1;
+    while (requestIndex < requestedYs.length && requestedYs[requestIndex] <= current + 8) requestIndex += 1;
+
+    const target = Math.min(current + pageHeight, stripHeight - 1);
+    const requested = requestIndex < requestedYs.length ? requestedYs[requestIndex] : null;
+    let breakY;
+
+    if (requested != null && requested <= target + 1) {
+      // A teacher-selected break that physically fits is honoured. It should
+      // already be snapped by the editor, but if it falls very near a part
+      // boundary, use the exact boundary to prevent slicing through glyphs.
+      const nearest = boundaryYs.reduce((best, y) => {
+        const distance = Math.abs(y - requested);
+        return !best || distance < best.distance ? { y, distance } : best;
+      }, null);
+      breakY = nearest && nearest.distance <= Math.max(8, stripHeight * 0.008) ? nearest.y : requested;
+      requestIndex += 1;
+    } else {
+      // The next requested break is too far down to fit on the current A4
+      // page (or there is no requested break). Insert a safe break now rather
+      // than allowing makeFinalPages() to clip the bottom of the content.
+      breakY = safeBreakBefore(current, target);
+    }
+
+    if (breakY <= current + 8) breakY = target;
+    breakY = Math.min(breakY, stripHeight - 1);
+    result.push(round4(breakY / stripHeight));
+    current = breakY;
+  }
+
+  return [...new Set(result)].sort((a, b) => a - b);
+}
+
 function makeFinalPages(strip, breaks) {
   const boundaries = [0, ...breaks.map((value) => clamp(value, 0.001, 0.999)), 1].sort((a, b) => a - b);
   const pages = [];
@@ -2406,9 +2475,19 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   if (loading || !strip) return <div className="loading-card">Building cleaned question preview…</div>;
 
   const compacted = buildCompactedStrip(strip.canvas, savedExclusions);
-  const compactedBreaks = (savedBreaks || [])
+  const compactedParts = strip.partFractions
+    .filter((part) => !compacted.exclusions.some((range) => part.fraction > range.start && part.fraction < range.end))
+    .map((part) => ({ ...part, fraction: compacted.originalToCompacted(part.fraction) }));
+  const requestedCompactedBreaks = (savedBreaks || [])
     .filter((fraction) => !compacted.exclusions.some((range) => fraction > range.start && fraction < range.end))
     .map(compacted.originalToCompacted);
+  const compactedBreaks = normalizeBreaksForPageCapacity(
+    compacted.canvas.width,
+    compacted.canvas.height,
+    compactedParts,
+    requestedCompactedBreaks,
+  );
+  const effectiveOriginalBreaks = compactedBreaks.map(compacted.compactedToOriginal);
   const finalPages = makeFinalPages(compacted.canvas, compactedBreaks);
   const sourcePages = [];
   for (let page = region.start.page; page <= region.end.page; page += 1) sourcePages.push(page);
@@ -2533,7 +2612,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       <div className="preview-grid">
         <div className="layout-editor-panel">
           <div className="panel-heading compact-panel-heading"><div><h3>Edit crop</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : addBreakMode ? 'Click where the new page should end; it will snap to a nearby part boundary.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} removed</span></div>
-          <StripBreakEditor strip={strip} breaks={savedBreaks || []} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} addBreakMode={addBreakMode} onAddBreakComplete={() => setAddBreakMode(false)} />
+          <StripBreakEditor strip={strip} breaks={effectiveOriginalBreaks} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} addBreakMode={addBreakMode} onAddBreakComplete={() => setAddBreakMode(false)} />
         </div>
         <div className="final-pages-panel">
           <div className="panel-heading compact-panel-heading"><div><h3>Output preview</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div></div>
