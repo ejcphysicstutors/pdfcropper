@@ -1524,6 +1524,14 @@ function App() {
           )}
           {!!pages.length && !loading && viewMode === 'preview' && (
             <PreviewWorkspace pages={pages} region={selectedRegion} headerPct={headerPct} footerPct={footerPct}
+              hasPrevious={selectedRegionIndex > 0}
+              hasNext={selectedRegionIndex >= 0 && selectedRegionIndex < regions.length - 1}
+              onPrevious={() => {
+                if (selectedRegionIndex > 0) setSelectedQuestionId(regions[selectedRegionIndex - 1].id);
+              }}
+              onNext={() => {
+                if (selectedRegionIndex >= 0 && selectedRegionIndex < regions.length - 1) setSelectedQuestionId(regions[selectedRegionIndex + 1].id);
+              }}
               savedBreaks={selectedRegion ? outputBreaks[selectedRegion.id] : []}
               savedExclusions={selectedRegion ? exclusions[selectedRegion.id] || [] : []}
               globalReviewTrim={globalReviewTrim}
@@ -1874,7 +1882,7 @@ function buildCompactedStrip(strip, exclusions) {
   return { canvas: out, exclusions: normalized, originalToCompacted, compactedToOriginal, joinGapPx };
 }
 
-function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, globalReviewTrim, onGlobalReviewTrimChange, trimOverrides, onTrimOverridesChange }) {
+function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, hasNext, onPrevious, onNext, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, globalReviewTrim, onGlobalReviewTrimChange, trimOverrides, onTrimOverridesChange }) {
   const [strip, setStrip] = useState(null);
   const [loading, setLoading] = useState(false);
   const [autoBreaks, setAutoBreaks] = useState([]);
@@ -1971,8 +1979,12 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, savedBreaks, on
     <div className="preview-review-workspace">
       <div className="preview-toolbar compact-preview-toolbar">
         <div className="preview-title-row">
-          <div><p className="eyebrow">Layout</p><h2>{region.label}</h2></div>
-          <p>Drag purple page breaks. Use <strong>X</strong> to remove unwanted blank space.</p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button type="button" className="ghost compact" onClick={onPrevious} disabled={!hasPrevious} aria-label="Previous question" title="Previous question" style={{ minWidth: 38, fontSize: '1.2rem', lineHeight: 1 }}>←</button>
+            <div><p className="eyebrow">Layout</p><h2>{region.label}</h2></div>
+            <button type="button" className="ghost compact" onClick={onNext} disabled={!hasNext} aria-label="Next question" title="Next question" style={{ minWidth: 38, fontSize: '1.2rem', lineHeight: 1 }}>→</button>
+          </div>
+          <p>Use ← / → to review adjacent questions. Drag purple page breaks. Use <strong>X</strong> to remove unwanted blank space.</p>
         </div>
         <div className="preview-actions">
           <button className={`ghost compact ${excludeMode ? 'active-tool' : ''}`} onClick={() => setExcludeMode((value) => !value)}>Remove blank space <kbd>X</kbd></button>
