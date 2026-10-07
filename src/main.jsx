@@ -237,8 +237,8 @@ function App() {
   const [file, setFile] = useState(null);
   const [pdf, setPdf] = useState(null);
   const [pages, setPages] = useState([]);
-  const [headerPct, setHeaderPct] = useState(6);
-  const [footerPct, setFooterPct] = useState(6);
+  const [headerPct, setHeaderPct] = useState(3);
+  const [footerPct, setFooterPct] = useState(3);
   const [lines, setLines] = useState([]);
   const [lineMode, setLineMode] = useState(START);
   const [heldLineMode, setHeldLineMode] = useState(null);
@@ -352,8 +352,8 @@ function App() {
 
   function applyEditableSnapshot(snapshot) {
     if (!snapshot) return;
-    setHeaderPct(snapshot.headerPct ?? 6);
-    setFooterPct(snapshot.footerPct ?? 6);
+    setHeaderPct(snapshot.headerPct ?? 3);
+    setFooterPct(snapshot.footerPct ?? 3);
     setLines(Array.isArray(snapshot.lines) ? snapshot.lines : []);
     setSegmentLabelOverrides(snapshot.segmentLabelOverrides || {});
     setSegmentPartFlags(snapshot.segmentPartFlags || {});
@@ -494,8 +494,8 @@ function App() {
       setPages(nextPages);
       if (restoreSnapshot) {
         setWorkflowKind(restoreSnapshot.workflowKind || kindOverride || 'questions');
-        setHeaderPct(Number.isFinite(restoreSnapshot.headerPct) ? restoreSnapshot.headerPct : 6);
-        setFooterPct(Number.isFinite(restoreSnapshot.footerPct) ? restoreSnapshot.footerPct : 6);
+        setHeaderPct(Number.isFinite(restoreSnapshot.headerPct) ? restoreSnapshot.headerPct : 3);
+        setFooterPct(Number.isFinite(restoreSnapshot.footerPct) ? restoreSnapshot.footerPct : 3);
         setLines(Array.isArray(restoreSnapshot.lines) ? restoreSnapshot.lines : []);
         setLineMode(restoreSnapshot.lineMode || START);
         setShowGuides(restoreSnapshot.showGuides !== false);
@@ -705,8 +705,8 @@ function App() {
 
     return {
       workflowKind: kind,
-      headerPct: Number.isFinite(Number(payload?.headerFraction)) ? Number(payload.headerFraction) * 100 : 6,
-      footerPct: Number.isFinite(Number(payload?.footerFraction)) ? Number(payload.footerFraction) * 100 : 6,
+      headerPct: Number.isFinite(Number(payload?.headerFraction)) ? Number(payload.headerFraction) * 100 : 3,
+      footerPct: Number.isFinite(Number(payload?.footerFraction)) ? Number(payload.footerFraction) * 100 : 3,
       lines: importedLines.sort(comparePos),
       lineMode: START,
       showGuides: true,
@@ -1023,7 +1023,7 @@ function App() {
       const bottom = 1 - footerPct / 100;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom) continue;
-        if (!/\[?\s*Total\s*[:=]\s*\d+\s*marks?\s*\]?/i.test(row.text)) continue;
+        if (!/\[?\s*Total\s*[:=]\s*\d+(?:\s*marks?)?\s*\]?/i.test(row.text)) continue;
         totals.push({ page: pageData.pageNumber, y: round4(Math.min(bottom - 0.004, row.yNorm + 0.026)) });
       }
     }
@@ -1040,6 +1040,7 @@ function App() {
     const totals = detectTotalMarks();
     const rawParts = detectPartStarts();
     const candidates = [];
+    const autoNotPartIds = [];
     let usedTotalCount = 0;
 
     starts.forEach((start, index) => {
@@ -1084,12 +1085,34 @@ function App() {
         ? questionPartStarts
         : questionPartStarts.slice(1);
 
-      partBoundaryCandidates.forEach((part) => {
-        candidates.push({
-          id: makeId(PART), page: part.page, y: part.y, kind: PART,
-          label: '', manualLabel: false, source: 'suggested', questionIndex: index,
-        });
-      });
+      const createdPartLines = partBoundaryCandidates.map((part) => ({
+        id: makeId(PART), page: part.page, y: part.y, kind: PART,
+        label: '', manualLabel: false, source: 'suggested', questionIndex: index,
+      }));
+      candidates.push(...createdPartLines);
+
+      // Exam papers often print a final "[Total: n]" line below the last
+      // actual part. If automatic detection has created a trailing PART region
+      // whose only printable content is that total-marks line, keep the region
+      // for whole-question cropping but classify it as "Not a part".
+      if (createdPartLines.length) {
+        const trailingStart = createdPartLines[createdPartLines.length - 1];
+        const trailingRows = [];
+        for (const pageData of pages) {
+          if (pageData.pageNumber < trailingStart.page || pageData.pageNumber > end.page) continue;
+          const top = headerPct / 100;
+          const bottom = 1 - footerPct / 100;
+          for (const row of pageData.rows || []) {
+            if (row.yNorm <= top || row.yNorm >= bottom) continue;
+            const pos = { page: pageData.pageNumber, y: row.yNorm };
+            if (comparePos(pos, trailingStart) >= 0 && comparePos(pos, end) < 0) trailingRows.push(String(row.text || '').trim());
+          }
+        }
+        const visibleRows = trailingRows.filter(Boolean);
+        const hasTotal = visibleRows.some((text) => /\[?\s*Total\s*[:=]\s*\d+(?:\s*marks?)?\s*\]?/i.test(text));
+        const substantiveRows = visibleRows.filter((text) => !/^\[?\s*Total\s*[:=]\s*\d+(?:\s*marks?)?\s*\]?$/i.test(text));
+        if (hasTotal && substantiveRows.length === 0) autoNotPartIds.push(trailingStart.id);
+      }
     });
 
     setLines((current) => {
@@ -1102,6 +1125,13 @@ function App() {
       const modeNote = usedTotalCount ? `${usedTotalCount} end${usedTotalCount === 1 ? '' : 's'} anchored to [Total: … marks].` : 'No [Total: … marks] lines were found, so ends were inferred from the next question number (MCQ-style fallback).';
       setStatus(`Added ${additions.length} non-destructive suggestions. ${modeNote}`);
       const merged = [...current, ...additions].sort(comparePos);
+      if (autoNotPartIds.length) {
+        setSegmentPartFlags((flags) => {
+          const next = { ...flags };
+          autoNotPartIds.forEach((id) => { if (!(id in next)) next[id] = false; });
+          return next;
+        });
+      }
       setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]);
       const firstSuggestedStart = additions.find((line) => line.kind === START);
       if (firstSuggestedStart && !selectedQuestionId) setSelectedQuestionId(firstSuggestedStart.id);
@@ -2059,17 +2089,21 @@ function detectedFooterCutoff(pageData, configuredBottom) {
     const text = String(row.text || '').replace(/\s+/g, ' ').trim();
     if (!text) return false;
 
-    const explicitFooterText = y >= 0.72 && (
+    const explicitFooterText = y >= 0.65 && (
       /turn\s+over/i.test(text)
       || /\b\d{4}\s*\/\s*0?\d{1,2}\s*\//i.test(text)
       || /\b(?:ASRJC|HCI|RI|RJC|VJC|NJC|SAJC|EJC|ACJC|CJC|DHS|TJC|NYJC|YIJC|JPJC)\b/i.test(text) && /\d{4}/.test(text)
       || /^(?:©|copyright)\b/i.test(text)
     );
 
-    const centredPageNumber = y >= 0.80
+    // Page numbers on many JC papers sit surprisingly high above the physical
+    // bottom edge (sometimes around 70% of the source page). Treat a bare,
+    // horizontally centred integer in the lower third as page furniture so it
+    // cannot leak back into the worksheet preview after the nominal footer crop.
+    const centredPageNumber = y >= 0.68
       && /^\d{1,3}$/.test(text)
-      && Number(row.xNorm) >= 0.35
-      && Number(row.xNorm) <= 0.65;
+      && Number(row.xNorm) >= 0.32
+      && Number(row.xNorm) <= 0.68;
 
     return explicitFooterText || centredPageNumber;
   });
@@ -2158,15 +2192,46 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
 function automaticBreaks(stripWidth, stripHeight, partFractions) {
   const sourcePageHeight = PAGE_CONTENT_HEIGHT * (stripWidth / PAGE_CONTENT_WIDTH);
   if (stripHeight <= sourcePageHeight) return [];
+
+  // Treat every part start as both the start of the next part and the end of
+  // the previous part. A normal page should therefore finish on a part
+  // boundary rather than halfway through a part. If one individual part is
+  // taller than an A4 content area, there is no legal boundary available and
+  // that part is split only as much as necessary, with further breaks added
+  // automatically until the oversized part fits across the required pages.
+  const boundaryYs = [...new Set(
+    partFractions
+      .map((part) => part.fraction * stripHeight)
+      .filter((value) => value > 8 && value < stripHeight - 8)
+      .map((value) => Math.round(value))
+  )].sort((a, b) => a - b);
+
   const breaks = [];
   let current = 0;
-  const partYs = partFractions.map((part) => part.fraction * stripHeight).filter((value) => value > 0 && value < stripHeight);
-  while (current + sourcePageHeight < stripHeight - 1) {
+  let guard = 0;
+  while (current + sourcePageHeight < stripHeight - 1 && guard < 200) {
+    guard += 1;
     const target = current + sourcePageHeight;
-    const minimumUseful = current + sourcePageHeight * 0.56;
-    const candidates = partYs.filter((y) => y > minimumUseful && y <= target);
-    let breakY = candidates.length ? candidates[candidates.length - 1] : target;
-    if (breakY <= current + 10) breakY = target;
+    const candidates = boundaryYs.filter((y) => y > current + 8 && y <= target + 1);
+
+    // The latest boundary before the physical page end is the start of the
+    // part that would otherwise be split. Move the break there only when that
+    // whole part can fit on a fresh page. If that part is itself taller than a
+    // page, splitting it is unavoidable, so use the physical page limit.
+    let breakY = target;
+    if (candidates.length) {
+      const candidate = candidates[candidates.length - 1];
+      const nextBoundary = boundaryYs.find((y) => y > candidate + 1) ?? stripHeight;
+      const candidatePartHeight = nextBoundary - candidate;
+      if (candidatePartHeight <= sourcePageHeight + 1) breakY = candidate;
+    }
+
+    // No usable part boundary exists because the current part itself is taller
+    // than a page. Split that oversized part at the physical page limit and
+    // continue; the next loop adds another break if the remainder still
+    // overflows.
+    if (breakY <= current + 8) breakY = target;
+    breakY = Math.min(breakY, stripHeight - 1);
     breaks.push(round4(breakY / stripHeight));
     current = breakY;
   }
@@ -2292,6 +2357,8 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   const [loading, setLoading] = useState(false);
   const [autoBreaks, setAutoBreaks] = useState([]);
   const [excludeMode, setExcludeMode] = useState(false);
+  const [showExcludeHelp, setShowExcludeHelp] = useState(false);
+  const [addBreakMode, setAddBreakMode] = useState(false);
   const [individualTrimMode, setIndividualTrimMode] = useState(false);
 
   useEffect(() => {
@@ -2326,7 +2393,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       setLoading(false);
     }).catch((error) => { console.error(error); if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [pages, region?.id, region?.start.page, region?.start.y, region?.end.page, region?.end.y, headerPct, footerPct, globalReviewTrim.topExtra, globalReviewTrim.bottomExtra, JSON.stringify(trimOverrides), JSON.stringify(savedExclusions)]);
+  }, [pages, region?.id, region?.start.page, region?.start.y, region?.end.page, region?.end.y, headerPct, footerPct, globalReviewTrim.topExtra, globalReviewTrim.bottomExtra, JSON.stringify(trimOverrides)]);
 
   if (!region) return <div className="preview-empty large">Select a question to review.</div>;
   if (loading || !strip) return <div className="loading-card">Building cleaned question preview…</div>;
@@ -2376,8 +2443,24 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       return round4(newCompacted.compactedToOriginal(newCompactedFraction));
     }).sort((a, b) => a - b);
 
+    // Recalculate the automatic-break suggestion against the newly compacted
+    // strip without rebuilding the source strip. Rebuilding here used to replace
+    // the whole review workspace with a loading card, which jumped the teacher
+    // back to the top of the page after every exclusion.
+    const compactedParts = strip.partFractions
+      .filter((part) => !newCompacted.exclusions.some((range) => part.fraction > range.start && part.fraction < range.end))
+      .map((part) => ({ ...part, fraction: newCompacted.originalToCompacted(part.fraction) }));
+    const nextAuto = automaticBreaks(newCompacted.canvas.width, newCompacted.canvas.height, compactedParts)
+      .map(newCompacted.compactedToOriginal);
+    setAutoBreaks(nextAuto);
+
+    const scrollTop = document.scrollingElement?.scrollTop ?? window.scrollY;
+    const scrollLeft = document.scrollingElement?.scrollLeft ?? window.scrollX;
     onExclusionsChange(nextExclusions);
     if (shiftedBreaks.length) onBreaksChange(shiftedBreaks);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      window.scrollTo({ top: scrollTop, left: scrollLeft, behavior: 'auto' });
+    }));
   }
 
   return (
@@ -2392,10 +2475,16 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
           <p>Use ← / → to review adjacent questions. Drag purple page breaks. Use <strong>X</strong> to remove unwanted blank space.</p>
         </div>
         <div className="preview-actions">
-          <button className={`ghost compact ${excludeMode ? 'active-tool' : ''}`} onClick={() => setExcludeMode((value) => !value)}>Remove blank space <kbd>X</kbd></button>
-          <button className="ghost compact" onClick={() => onBreaksChange(autoBreaks)}>Reset breaks</button>
+          <button className={`ghost compact ${excludeMode ? 'active-tool' : ''}`} onClick={() => { setExcludeMode((value) => !value); setAddBreakMode(false); }}>Remove blank space <kbd>X</kbd></button>
+          <button className="ghost compact" onClick={() => setShowExcludeHelp((value) => !value)} aria-expanded={showExcludeHelp}>{showExcludeHelp ? 'Hide removal help' : 'How to remove space'}</button>
+          <button className={`ghost compact ${addBreakMode ? 'active-tool' : ''}`} onClick={() => { setAddBreakMode((value) => !value); setExcludeMode(false); }}>{addBreakMode ? 'Click crop to place break' : '+ Add page break'}</button>
+          <button className="ghost compact" onClick={() => { onBreaksChange(autoBreaks); setAddBreakMode(false); }}>Reset smart breaks</button>
         </div>
       </div>
+
+      {showExcludeHelp && <div style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #cfd8e6', borderRadius: 10, background: '#fff', color: '#43516a', fontSize: '.82rem', lineHeight: 1.45 }}>
+        <strong style={{ color: '#24324a' }}>Remove blank space:</strong> click <strong>Remove blank space</strong> (or press <kbd>X</kbd>), then drag vertically across the unwanted band in <strong>Edit crop</strong>. Double-click a grey <strong>EXCLUDED</strong> band to restore it.
+      </div>}
 
       <details className="review-trim-card compact-trim-card">
         <summary>
@@ -2436,8 +2525,8 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
 
       <div className="preview-grid">
         <div className="layout-editor-panel">
-          <div className="panel-heading compact-panel-heading"><div><h3>Edit crop</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} removed</span></div>
-          <StripBreakEditor strip={strip} breaks={savedBreaks || []} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} />
+          <div className="panel-heading compact-panel-heading"><div><h3>Edit crop</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : addBreakMode ? 'Click where the new page should end; it will snap to a nearby part boundary.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} removed</span></div>
+          <StripBreakEditor strip={strip} breaks={savedBreaks || []} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} addBreakMode={addBreakMode} onAddBreakComplete={() => setAddBreakMode(false)} />
         </div>
         <div className="final-pages-panel">
           <div className="panel-heading compact-panel-heading"><div><h3>Output preview</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div></div>
@@ -2450,7 +2539,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   );
 }
 
-function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusionsChange, excludeMode }) {
+function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusionsChange, excludeMode, addBreakMode, onAddBreakComplete }) {
   const containerRef = useRef(null);
   const [draftExclude, setDraftExclude] = useState(null);
 
@@ -2459,16 +2548,38 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
     return clamp((event.clientY - rect.top) / rect.height, 0, 1);
   }
 
-  function updateBreak(index, event) {
-    let fraction = clamp(fractionFromEvent(event), 0.02, 0.98);
+  function snapBreakFraction(fraction, threshold = 0.035) {
     const normalizedExclusions = normalizeExclusions(exclusions);
     const inside = normalizedExclusions.find((range) => fraction > range.start && fraction < range.end);
     if (inside) fraction = Math.abs(fraction - inside.start) < Math.abs(inside.end - fraction) ? inside.start : inside.end;
-    const nearestPart = strip.partFractions.reduce((best, part) => {
-      const distance = Math.abs(part.fraction - fraction);
-      return !best || distance < best.distance ? { distance, fraction: part.fraction } : best;
+
+    const boundaries = [
+      ...strip.partFractions.map((part) => part.fraction),
+      1,
+    ].filter((value) => value > 0.01 && value < 0.99);
+    const nearest = boundaries.reduce((best, value) => {
+      const distance = Math.abs(value - fraction);
+      return !best || distance < best.distance ? { distance, fraction: value } : best;
     }, null);
-    if (nearestPart && nearestPart.distance < 0.018) fraction = nearestPart.fraction;
+    if (nearest && nearest.distance <= threshold) return nearest.fraction;
+    return fraction;
+  }
+
+  function addBreakAt(event) {
+    if (!addBreakMode || event.target.closest('.page-break-line') || event.target.closest('.excluded-band')) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    let fraction = clamp(fractionFromEvent(event), 0.02, 0.98);
+    fraction = snapBreakFraction(fraction, 0.055);
+    if ((breaks || []).some((value) => Math.abs(value - fraction) < 0.012)) return true;
+    onBreaksChange([...(breaks || []), round4(fraction)].sort((a, b) => a - b));
+    onAddBreakComplete?.();
+    return true;
+  }
+
+  function updateBreak(index, event) {
+    let fraction = clamp(fractionFromEvent(event), 0.02, 0.98);
+    fraction = snapBreakFraction(fraction, 0.03);
     const previous = index > 0 ? breaks[index - 1] : 0;
     const isLastBreak = index === breaks.length - 1;
     const next = isLastBreak ? 1 : breaks[index + 1];
@@ -2497,6 +2608,7 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
   }
 
   function beginExclude(event) {
+    if (addBreakAt(event)) return;
     if (!excludeMode || event.target.closest('.page-break-line') || event.target.closest('.excluded-band')) return;
     event.preventDefault();
     const start = fractionFromEvent(event);
@@ -2520,7 +2632,7 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
   const draftHeight = draftExclude ? Math.abs(draftExclude.end - draftExclude.start) : 0;
 
   return (
-    <div ref={containerRef} className={`strip-editor ${excludeMode ? 'exclude-mode' : ''}`} onPointerDown={beginExclude}>
+    <div ref={containerRef} className={`strip-editor ${excludeMode ? 'exclude-mode' : ''} ${addBreakMode ? 'add-break-mode' : ''}`} onPointerDown={beginExclude}>
       <img src={strip.dataUrl} alt="Continuous cleaned question" />
       {strip.partFractions.map((part) => <div key={part.id} className="preview-part-guide" style={{ top: `${part.fraction * 100}%` }}><span>{part.label}</span></div>)}
       {normalizeExclusions(exclusions).map((range, index) => (
