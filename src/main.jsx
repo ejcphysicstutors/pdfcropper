@@ -273,6 +273,7 @@ function App() {
   const [reviewedRegionIds, setReviewedRegionIds] = useState([]);
   const [helpOpen, setHelpOpen] = useState(false);
   const [pendingMismatch, setPendingMismatch] = useState(null);
+  const [awaitingSolutionPdf, setAwaitingSolutionPdf] = useState(false);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [downloadBaselineFingerprint, setDownloadBaselineFingerprint] = useState(null);
   const historyRef = useRef([]);
@@ -457,6 +458,9 @@ function App() {
 
   async function openPdf(selected, kindOverride = workflowKind, restoreSnapshot = null) {
     if (!selected) return;
+    // Set the document mode before replacing the current PDF so components never
+    // render a question/solution state against the wrong document during transition.
+    if (!restoreSnapshot) setWorkflowKind(kindOverride || 'questions');
     setLoading(true);
     setStatus('Loading PDF…');
     historyRef.current = [];
@@ -745,6 +749,7 @@ function App() {
   }
 
   function resetForSolutionIntake(payload) {
+    setAwaitingSolutionPdf(false);
     const questions = Array.isArray(payload?.questions) ? payload.questions : [];
     setQuestionPayload(payload);
     setSolutionPayload(null);
@@ -777,6 +782,18 @@ function App() {
     const jsonFiles = selected.filter((item) => item.type === 'application/json' || /\.json$/i.test(item.name));
 
     try {
+      // When the teacher has just chosen “Continue with solutions”, keep the
+      // completed question paper on screen until a solution PDF is actually
+      // selected. This avoids tearing down the current PDF and prevents the
+      // transient blank-screen state that could occur during the hand-off.
+      if (awaitingSolutionPdf && questionPayload && selected.length === 1 && pdfFiles.length === 1) {
+        setAwaitingSolutionPdf(false);
+        setSolutionPayload(null);
+        setSolutionJsonSaved(false);
+        await openPdf(pdfFiles[0], 'solutions');
+        return;
+      }
+
       // Normal start: one paper PDF means a new question-paper crop.
       if (selected.length === 1 && pdfFiles.length === 1) {
         if (workflowKind === 'solutions' && solutionPayload?.documentType === 'solution-segmentation') {
@@ -798,6 +815,7 @@ function App() {
       // boundary edits" or "question JSON + a different PDF = continue with
       // solutions". Use document type plus source filename to decide.
       if (selected.length === 2 && pdfFiles.length === 1 && jsonFiles.length === 1) {
+        setAwaitingSolutionPdf(false);
         const parsed = await parseSegmentationJson(jsonFiles[0]);
         const payload = parsed.payload;
         const sourceMatches = pdfMatchesSegmentationSource(pdfFiles[0], payload);
@@ -837,6 +855,7 @@ function App() {
       // Question JSON waits for a solution PDF; solution JSON waits for its own
       // solution PDF so the saved solution boundaries can be reopened.
       if (selected.length === 1 && jsonFiles.length === 1) {
+        setAwaitingSolutionPdf(false);
         const parsed = await parseSegmentationJson(jsonFiles[0]);
         if (parsed.kind === 'solutions') {
           setSolutionPayload(parsed.payload);
@@ -1442,31 +1461,19 @@ function App() {
     if (!segmentationApproved) return;
     const payload = questionPayload || buildSegmentationPayload('questions');
     if (!payload) return;
+
+    // Keep the completed question paper mounted while the native file picker is
+    // open. We only switch documents after a solution PDF has actually been
+    // chosen. Apart from being less jarring, this prevents a blank-screen race
+    // caused by clearing the current PDF before the replacement existed.
     setQuestionPayload(payload);
-    setWorkflowKind('solutions');
-    setSolutionPayload(null);
-    setSolutionJsonSaved(false);
-    setFile(null);
-    setPdf(null);
-    setPages([]);
-    setLines([]);
-    setLastSuggestionIds([]);
-    setSelectedQuestionId(null);
-    setSelectedLineId(null);
-    setSelectedSegmentId(null);
-    setOutputBreaks({});
-    setExclusions({});
-    setTrimOverrides({});
-    setSegmentationApproved(false);
-    setSegmentationApprovedAt(null);
-    setApprovalIssues([]);
-    setViewMode('segment');
-    setReviewedRegionIds([]);
-    setStatus(`Question JSON retained in this browser session. Choose the solution PDF; ${payload.questions.length} parent questions must reconcile exactly.`);
-    setTimeout(() => fileInputRef.current?.click(), 0);
+    setAwaitingSolutionPdf(true);
+    setStatus(`Question JSON retained. Choose the solution PDF; ${payload.questions.length} parent questions will be reconciled exactly.`);
+    window.setTimeout(() => fileInputRef.current?.click(), 0);
   }
 
   function uploadAnotherPaper() {
+    setAwaitingSolutionPdf(false);
     setWorkflowKind('questions');
     setQuestionPayload(null);
     setSolutionPayload(null);
@@ -1923,7 +1930,7 @@ function App() {
               <section className="compact-section save-section">
                 <button className="primary full" onClick={exportSegmentation} disabled={!segmentationApproved}>{workflowKind === 'solutions' ? 'Save solution JSON' : 'Save question JSON'}</button>
                 <p className="small">Saves the approved source boundaries and reviewed page layout.</p>
-                {workflowKind === 'questions' && questionPayload && segmentationApproved && <div className="completion-card"><strong>✓ Question JSON saved</strong><span>{questionPayload.sourceFile || file?.name}</span><button className="ghost full" type="button" onClick={continueWithSolutions}>Continue with solutions →</button><button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
+                {workflowKind === 'questions' && questionPayload && segmentationApproved && <div className="completion-card"><strong>✓ Question JSON saved</strong><span>{questionPayload.sourceFile || file?.name}</span><button className="ghost full" type="button" onClick={continueWithSolutions}>{awaitingSolutionPdf ? 'Choose solution PDF…' : 'Continue with solutions →'}</button><button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
                 {workflowKind === 'solutions' && solutionJsonSaved && <div className="completion-card"><strong>✓ Solution JSON saved</strong><span>{solutionPayload?.sourceFile || file?.name}</span>{questionPayload && solutionPayload && <button className="ghost full" type="button" onClick={downloadCombinedPackage}>Download both JSONs</button>}<button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
               </section>
             </>
