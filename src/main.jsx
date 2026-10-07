@@ -140,6 +140,24 @@ function parseCompactSolutionMarker(text) {
   };
 }
 
+function isMcqAnswerKeyRow(text) {
+  const cleaned = normalizePrintedMarkerText(text);
+  if (!cleaned) return false;
+
+  // Paper 1 schemes commonly begin with a dense answer-key table such as:
+  // "1 D 6 A 11 A 16 C 21 D 26 C". Those cells are answers, not solution
+  // starts or subparts. Ignore any row containing several number + option pairs.
+  const pairs = [...cleaned.matchAll(/(?:^|\s)(\d{1,2})\s*([A-D])(?=\s|$)/gi)];
+  if (pairs.length >= 3) return true;
+
+  // PDF extraction can sometimes omit spacing around table cell boundaries.
+  // A row with several question numbers and several standalone A-D options is
+  // still overwhelmingly likely to be the collated MCQ answer table.
+  const numbers = cleaned.match(/(?:^|\s)\d{1,2}(?=\s|$)/g) || [];
+  const options = cleaned.match(/(?:^|\s)[A-D](?=\s|$)/gi) || [];
+  return numbers.length >= 3 && options.length >= 3;
+}
+
 function authoritativeQuestionSegments(question) {
   const segments = (question?.segments || []).filter((segment) => segment.isPart !== false);
   return segments.filter((segment) => {
@@ -203,6 +221,12 @@ function App() {
     function handleShortcutDown(event) {
       if (event.ctrlKey || event.metaKey || event.altKey || isTypingTarget(event.target)) return;
       if (viewMode !== 'segment') return;
+
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedLineId) {
+        removeLine(selectedLineId);
+        event.preventDefault();
+        return;
+      }
 
       if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && selectedLineId) {
         const direction = event.key === 'ArrowUp' ? -1 : 1;
@@ -385,6 +409,7 @@ function App() {
     setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]);
     setLastSuggestionIds((ids) => ids.filter((item) => item !== id));
     setSelectedLineId((current) => current === id ? null : current);
+    setStatus('Boundary removed.');
   }
 
   function updateLineLabel(id, label) {
@@ -439,6 +464,7 @@ function App() {
       const bottom = 1 - footerPct / 100;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom || row.xNorm > 0.19) continue;
+        if (workflowKind === 'solutions' && isMcqAnswerKeyRow(row.text)) continue;
         const match = workflowKind === 'solutions'
           ? row.text.match(/^(?:Q\s*)?(\d{1,2})(?=\s|\(|[.)]|[a-h](?:[ivxlcdm]+)?\b)/i)
           : row.text.match(/^(?:Q\s*)?(\d{1,2})(?=\s|\(|[.)])/i);
@@ -475,6 +501,7 @@ function App() {
       const bottom = 1 - footerPct / 100;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom || row.xNorm > 0.30) continue;
+        if (workflowKind === 'solutions' && isMcqAnswerKeyRow(row.text)) continue;
         const marker = workflowKind === 'solutions'
           ? (parseCompactSolutionMarker(row.text) || parseLeadingPartMarker(row.text))
           : parseLeadingPartMarker(row.text);
@@ -1091,6 +1118,19 @@ function App() {
   }), [lines]);
   const explicitEndCount = regions.filter((region) => region.endExplicit).length;
 
+  function handleFileDrop(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const dropped = event.dataTransfer?.files;
+    if (!dropped?.length) return;
+    handleIntakeFiles(dropped);
+  }
+
+  function allowFileDrop(event) {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  }
+
   function enterPreview() {
     if (!regions.length) return;
     const issues = validateSegmentation();
@@ -1105,7 +1145,7 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" onDragOver={allowFileDrop} onDrop={handleFileDrop}>
       <header className="topbar">
         <div>
           <p className="eyebrow">Local browser tool</p>
@@ -1166,7 +1206,7 @@ function App() {
                       <button className={`line-mode end-mode ${(heldLineMode || lineMode) === END ? 'active' : ''}`} onClick={() => setLineMode(END)}><span className="mode-swatch end-swatch" />Question end <kbd>E</kbd></button>
                       <button className={`line-mode part-mode ${(heldLineMode || lineMode) === PART ? 'active' : ''}`} onClick={() => setLineMode(PART)}><span className="mode-swatch part-swatch" />Part <kbd>P</kbd></button>
                     </div>
-                    <p className="small">Click a line, then use <strong>↑ / ↓</strong> for fine adjustment. Hold <strong>Shift</strong> for a larger nudge. Drag to move; double-click to remove.</p>
+                    <p className="small">Click a line, then use <strong>↑ / ↓</strong> for fine adjustment. Hold <strong>Shift</strong> for a larger nudge. Drag to move; double-click or press <strong>Delete</strong> / <strong>Backspace</strong> to remove.</p>
                     <div className="button-stack compact-buttons">
                       <button className="ghost" onClick={undoLastSuggestions} disabled={!lastSuggestionIds.length}>Undo detection</button>
                       <button className="ghost clear-button" onClick={clearLines} disabled={!lines.length}>Clear all</button>
@@ -1262,7 +1302,7 @@ function App() {
               <div className="empty-icon">PDF</div><h2>{workflowKind === 'solutions' ? 'Choose the matching solution file' : 'Choose files'}</h2>
               <p>{workflowKind === 'solutions' ? `The question JSON is loaded locally. Choose its solution PDF; it must reconcile to ${questionPayload?.questions?.length || 0} parent questions.` : 'Select one question-paper PDF to start. To continue a paper later, select its saved question JSON and matching solution PDF together.'}</p>
               <button className="primary" onClick={() => fileInputRef.current?.click()}>Choose {workflowKind === 'solutions' ? 'solution PDF' : 'files'}</button>
-              {workflowKind === 'questions' && <small className="panel-note">One PDF = new question paper · Question JSON + solution PDF = continue automatically.</small>}
+              {workflowKind === 'questions' && <small className="panel-note">Drop files anywhere, or choose them here. One PDF = new question paper · Question JSON + solution PDF = continue automatically.</small>}
             </div>
           )}
           {loading && <div className="loading-card">Preparing pages…</div>}
@@ -1381,7 +1421,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
           return (
             <div key={line.id} className={`crop-line ${line.kind} ${line.source === 'suggested' ? 'suggested-line' : 'confirmed-line'} ${selectedLineId === line.id ? 'selected-line' : ''}`} style={{ top: `${yVisible}%` }}
               onClick={(e) => { e.stopPropagation(); onSelectLine(line.id); }} onPointerDown={(e) => { onSelectLine(line.id); beginDrag(e, line.id); }}
-              onDoubleClick={(e) => { e.stopPropagation(); onRemoveLine(line.id); }} title="Click to select. Use Up/Down arrows for fine adjustment. Drag to move. Double-click to remove.">
+              onDoubleClick={(e) => { e.stopPropagation(); onRemoveLine(line.id); }} title="Click to select. Use Up/Down arrows for fine adjustment. Drag to move. Double-click or press Delete/Backspace to remove.">
               <span className="line-tag">{displayText(line)}</span>
             </div>
           );
