@@ -366,7 +366,15 @@ function App() {
     if (questionPayload?.questions?.length) questionAuthorityRef.current = questionPayload;
   }, [questionPayload]);
 
-  useEffect(() => () => { if (pdf) pdf.destroy(); }, [pdf]);
+  useEffect(() => () => {
+    // Some restored/hot-reloaded states can temporarily hold a non-PDF value.
+    // Never let cleanup crash the whole app just because destroy() is absent.
+    if (pdf && typeof pdf.destroy === 'function') {
+      Promise.resolve(pdf.destroy()).catch((error) => {
+        console.warn('Could not destroy previous PDF document cleanly.', error);
+      });
+    }
+  }, [pdf]);
 
   useEffect(() => {
     if (!status) return undefined;
