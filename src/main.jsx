@@ -13,7 +13,7 @@ const END = 'question-end';
 const PART = 'part';
 const PAGE_CONTENT_WIDTH = 706;
 const PAGE_CONTENT_HEIGHT = 1035;
-const APP_VERSION = '0.9.0-trial';
+const APP_VERSION = '0.9.1-trial';
 
 const LOCAL_DRAFT_DB = 'prelim-cropper-local-v1';
 const LOCAL_DRAFT_STORE = 'drafts';
@@ -233,6 +233,43 @@ function authoritativeQuestionSegments(question) {
   });
 }
 
+
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error('Prelim Cropper render error', error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    const message = this.state.error?.message || String(this.state.error);
+    return (
+      <div className="fatal-error-screen">
+        <div className="fatal-error-card">
+          <p className="eyebrow">Prelim Cropper · recovery</p>
+          <h1>The cropper hit an unexpected error</h1>
+          <p>Your local autosave should still be available. Reload the page and choose <strong>Continue</strong> to recover the last saved state.</p>
+          <details>
+            <summary>Technical details</summary>
+            <code>{message}</code>
+          </details>
+          <div className="fatal-error-actions">
+            <button className="primary" type="button" onClick={() => window.location.reload()}>Reload cropper</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
 function App() {
   const [file, setFile] = useState(null);
   const [pdf, setPdf] = useState(null);
@@ -281,6 +318,7 @@ function App() {
   const lastHistoryFingerprintRef = useRef(null);
   const applyingHistoryRef = useRef(false);
   const baselinePendingRef = useRef(false);
+  const questionAuthorityRef = useRef(null);
 
   const editableSnapshot = useMemo(() => ({
     headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks,
@@ -290,6 +328,10 @@ function App() {
   const jsonState = !file ? null : downloadBaselineFingerprint == null
     ? 'not-downloaded'
     : (downloadBaselineFingerprint === currentEditFingerprint ? 'up-to-date' : 'changed');
+
+  useEffect(() => {
+    if (questionPayload?.questions?.length) questionAuthorityRef.current = questionPayload;
+  }, [questionPayload]);
 
   useEffect(() => () => { if (pdf) pdf.destroy(); }, [pdf]);
 
@@ -456,37 +498,19 @@ function App() {
     };
   }, [selectedLineId, headerPct, footerPct, viewMode]);
 
-  async function openPdf(selected, kindOverride = workflowKind, restoreSnapshot = null) {
+  async function openPdf(selected, kindOverride = workflowKind, restoreSnapshot = null, authorityOverride = null) {
     if (!selected) return;
-    // Set the document mode before replacing the current PDF so components never
-    // render a question/solution state against the wrong document during transition.
-    if (!restoreSnapshot) setWorkflowKind(kindOverride || 'questions');
+
+    // Keep the currently mounted document intact while the replacement PDF is
+    // being parsed. This avoids a half-switched React state where solution mode
+    // is active but the new pages/authority do not exist yet.
     setLoading(true);
-    setStatus('Loading PDF…');
-    historyRef.current = [];
-    redoRef.current = [];
-    lastHistoryFingerprintRef.current = null;
-    setHistoryVersion((value) => value + 1);
-    baselinePendingRef.current = Boolean(restoreSnapshot?._fromSegmentationJson);
-    setDownloadBaselineFingerprint(restoreSnapshot?.downloadBaselineFingerprint || null);
-    setFile(selected);
-    setLines([]);
-    setLastSuggestionIds([]);
-    setSelectedQuestionId(null);
-    setSelectedLineId(null);
-    setOutputBreaks({});
-    setExclusions({});
-    setTrimOverrides({});
-    setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]);
-    if (!restoreSnapshot) setSolutionJsonSaved(false);
-    setViewMode('segment');
-    setReviewedRegionIds([]);
+    setStatus(kindOverride === 'solutions' ? 'Loading solution PDF…' : 'Loading PDF…');
 
     try {
       const bytes = new Uint8Array(await selected.arrayBuffer());
       const loadingTask = pdfjsLib.getDocument({ data: bytes });
       const loadedPdf = await loadingTask.promise;
-      setPdf(loadedPdf);
       const nextPages = [];
       for (let pageNumber = 1; pageNumber <= loadedPdf.numPages; pageNumber += 1) {
         const page = await loadedPdf.getPage(pageNumber);
@@ -495,7 +519,41 @@ function App() {
         nextPages.push({ pageNumber, page, viewport, textContent, rows: null });
       }
       nextPages.forEach((pageData) => { pageData.rows = extractTextRows(pageData); });
+
+      // Only commit the new document after it has loaded successfully.
+      historyRef.current = [];
+      redoRef.current = [];
+      lastHistoryFingerprintRef.current = null;
+      setHistoryVersion((value) => value + 1);
+      baselinePendingRef.current = Boolean(restoreSnapshot?._fromSegmentationJson);
+      setDownloadBaselineFingerprint(restoreSnapshot?.downloadBaselineFingerprint || null);
+
+      const nextKind = restoreSnapshot?.workflowKind || kindOverride || 'questions';
+      const authority = authorityOverride || restoreSnapshot?.questionPayload || questionAuthorityRef.current || questionPayload || null;
+      if (nextKind === 'solutions' && authority?.questions?.length) {
+        questionAuthorityRef.current = authority;
+        setQuestionPayload(authority);
+      }
+
+      setWorkflowKind(nextKind);
+      setFile(selected);
+      setPdf(loadedPdf);
       setPages(nextPages);
+      setLines([]);
+      setLastSuggestionIds([]);
+      setSelectedQuestionId(null);
+      setSelectedLineId(null);
+      setSelectedSegmentId(null);
+      setOutputBreaks({});
+      setExclusions({});
+      setTrimOverrides({});
+      setSegmentationApproved(false);
+      setSegmentationApprovedAt(null);
+      setApprovalIssues([]);
+      if (!restoreSnapshot) setSolutionJsonSaved(false);
+      setViewMode('segment');
+      setReviewedRegionIds([]);
+
       if (restoreSnapshot) {
         setWorkflowKind(restoreSnapshot.workflowKind || kindOverride || 'questions');
         setHeaderPct(Number.isFinite(restoreSnapshot.headerPct) ? restoreSnapshot.headerPct : 3);
@@ -517,21 +575,32 @@ function App() {
         setSegmentationApproved(Boolean(restoreSnapshot.segmentationApproved));
         setSegmentationApprovedAt(restoreSnapshot.segmentationApprovedAt || null);
         setApprovalIssues(Array.isArray(restoreSnapshot.approvalIssues) ? restoreSnapshot.approvalIssues : []);
-        setQuestionPayload(restoreSnapshot.questionPayload || null);
+        if (restoreSnapshot.questionPayload?.questions?.length) {
+          questionAuthorityRef.current = restoreSnapshot.questionPayload;
+          setQuestionPayload(restoreSnapshot.questionPayload);
+        } else if (nextKind !== 'solutions') {
+          setQuestionPayload(null);
+        }
         setSolutionPayload(restoreSnapshot.solutionPayload || null);
         setSolutionJsonSaved(Boolean(restoreSnapshot.solutionJsonSaved));
         setReviewedRegionIds(Array.isArray(restoreSnapshot.reviewedRegionIds) ? restoreSnapshot.reviewedRegionIds : []);
         setLastLocalSaveAt(restoreSnapshot.savedAt || null);
         setStatus(`Restored local work from ${new Date(restoreSnapshot.savedAt || Date.now()).toLocaleString()}. Continue from where you left off.`);
       } else {
-        setStatus(kindOverride === 'solutions'
+        // Fresh solution documents must retain their question authority. Fresh
+        // question documents intentionally start with no previous payload.
+        if (nextKind !== 'solutions') {
+          questionAuthorityRef.current = null;
+          setQuestionPayload(null);
+        }
+        setSolutionPayload(null);
+        setStatus(nextKind === 'solutions'
           ? `${loadedPdf.numPages} solution pages loaded. Detect solution blocks, then reconcile them against the approved question list.`
           : `${loadedPdf.numPages} pages loaded. Detect questions & parts, then scan the proposed starts, ends and part lines.`);
       }
     } catch (error) {
-      console.error(error);
-      setStatus('Could not open this PDF. Please try another file.');
-      setFile(null); setPdf(null); setPages([]);
+      console.error('Could not open PDF', error);
+      setStatus(`Could not open this ${kindOverride === 'solutions' ? 'solution ' : ''}PDF. The current work has been kept. Please try another file.`);
     } finally {
       setLoading(false);
     }
@@ -751,6 +820,7 @@ function App() {
   function resetForSolutionIntake(payload) {
     setAwaitingSolutionPdf(false);
     const questions = Array.isArray(payload?.questions) ? payload.questions : [];
+    questionAuthorityRef.current = payload;
     setQuestionPayload(payload);
     setSolutionPayload(null);
     setWorkflowKind('solutions');
@@ -786,11 +856,12 @@ function App() {
       // completed question paper on screen until a solution PDF is actually
       // selected. This avoids tearing down the current PDF and prevents the
       // transient blank-screen state that could occur during the hand-off.
-      if (awaitingSolutionPdf && questionPayload && selected.length === 1 && pdfFiles.length === 1) {
+      if (awaitingSolutionPdf && (questionPayload || questionAuthorityRef.current) && selected.length === 1 && pdfFiles.length === 1) {
+        const authority = questionPayload || questionAuthorityRef.current;
         setAwaitingSolutionPdf(false);
         setSolutionPayload(null);
         setSolutionJsonSaved(false);
-        await openPdf(pdfFiles[0], 'solutions');
+        await openPdf(pdfFiles[0], 'solutions', null, authority);
         return;
       }
 
@@ -801,7 +872,7 @@ function App() {
           await openPdf(pdfFiles[0], 'solutions', snapshot);
           setStatus('Solution boundaries loaded from the saved JSON. Adjust them as needed, approve again, then save a revised solution JSON.');
         } else if (workflowKind === 'solutions' && questionPayload) {
-          await openPdf(pdfFiles[0], 'solutions');
+          await openPdf(pdfFiles[0], 'solutions', null, questionPayload || questionAuthorityRef.current);
         } else {
           setWorkflowKind('questions');
           setQuestionPayload(null);
@@ -897,7 +968,7 @@ function App() {
       return;
     }
     const count = resetForSolutionIntake(pending.payload);
-    await openPdf(pending.pdfFile, 'solutions');
+    await openPdf(pending.pdfFile, 'solutions', null, pending.payload);
     setStatus(`Loaded the PDF as the solution and will reconcile it against ${count} parent questions.`);
   }
 
@@ -1466,6 +1537,7 @@ function App() {
     // open. We only switch documents after a solution PDF has actually been
     // chosen. Apart from being less jarring, this prevents a blank-screen race
     // caused by clearing the current PDF before the replacement existed.
+    questionAuthorityRef.current = payload;
     setQuestionPayload(payload);
     setAwaitingSolutionPdf(true);
     setStatus(`Question JSON retained. Choose the solution PDF; ${payload.questions.length} parent questions will be reconciled exactly.`);
@@ -1475,6 +1547,7 @@ function App() {
   function uploadAnotherPaper() {
     setAwaitingSolutionPdf(false);
     setWorkflowKind('questions');
+    questionAuthorityRef.current = null;
     setQuestionPayload(null);
     setSolutionPayload(null);
     setSolutionJsonSaved(false);
@@ -2834,4 +2907,4 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
   );
 }
 
-createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);
+createRoot(document.getElementById('root')).render(<React.StrictMode><AppErrorBoundary><App /></AppErrorBoundary></React.StrictMode>);
