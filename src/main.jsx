@@ -268,8 +268,18 @@ function App() {
   const [resumeDraft, setResumeDraft] = useState(null);
   const [resumePromptOpen, setResumePromptOpen] = useState(false);
   const [lastLocalSaveAt, setLastLocalSaveAt] = useState(null);
+  const [statusVisible, setStatusVisible] = useState(false);
+  const [reviewedRegionIds, setReviewedRegionIds] = useState([]);
 
   useEffect(() => () => { if (pdf) pdf.destroy(); }, [pdf]);
+
+  useEffect(() => {
+    if (!status) return undefined;
+    setStatusVisible(true);
+    const isAlert = /cannot|could not|fix|missing|different|expected|failed|please/i.test(status);
+    const timer = window.setTimeout(() => setStatusVisible(false), isAlert ? 7000 : 3800);
+    return () => window.clearTimeout(timer);
+  }, [status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -294,7 +304,7 @@ function App() {
     showGuides, selectedQuestionId, selectedLineId, selectedSegmentId,
     segmentLabelOverrides, segmentPartFlags, lastSuggestionIds, viewMode, outputBreaks,
     exclusions, trimOverrides, globalReviewTrim, segmentationApproved,
-    segmentationApprovedAt, approvalIssues, questionPayload, solutionPayload, solutionJsonSaved,
+    segmentationApprovedAt, approvalIssues, questionPayload, solutionPayload, solutionJsonSaved, reviewedRegionIds,
   ]);
 
   useEffect(() => {
@@ -369,6 +379,7 @@ function App() {
     setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]);
     if (!restoreSnapshot) setSolutionJsonSaved(false);
     setViewMode('segment');
+    setReviewedRegionIds([]);
 
     try {
       const bytes = new Uint8Array(await selected.arrayBuffer());
@@ -408,6 +419,7 @@ function App() {
         setQuestionPayload(restoreSnapshot.questionPayload || null);
         setSolutionPayload(restoreSnapshot.solutionPayload || null);
         setSolutionJsonSaved(Boolean(restoreSnapshot.solutionJsonSaved));
+        setReviewedRegionIds(Array.isArray(restoreSnapshot.reviewedRegionIds) ? restoreSnapshot.reviewedRegionIds : []);
         setLastLocalSaveAt(restoreSnapshot.savedAt || null);
         setStatus(`Restored local work from ${new Date(restoreSnapshot.savedAt || Date.now()).toLocaleString()}. Continue from where you left off.`);
       } else {
@@ -455,6 +467,7 @@ function App() {
       questionPayload,
       solutionPayload,
       solutionJsonSaved,
+      reviewedRegionIds,
     };
   }
 
@@ -621,6 +634,7 @@ function App() {
       questionPayload: questionAuthority,
       solutionPayload: solutionPayloadForSnapshot,
       solutionJsonSaved: false,
+      reviewedRegionIds: [],
       savedAt: new Date().toISOString(),
     };
   }
@@ -652,6 +666,7 @@ function App() {
     setSegmentationApprovedAt(null);
     setApprovalIssues([]);
     setViewMode('segment');
+    setReviewedRegionIds([]);
     return questions.length;
   }
 
@@ -1292,6 +1307,7 @@ function App() {
     setSegmentationApprovedAt(null);
     setApprovalIssues([]);
     setViewMode('segment');
+    setReviewedRegionIds([]);
     setStatus(`Question JSON retained in this browser session. Choose the solution PDF; ${payload.questions.length} parent questions must reconcile exactly.`);
     setTimeout(() => fileInputRef.current?.click(), 0);
   }
@@ -1319,6 +1335,7 @@ function App() {
     setSegmentationApprovedAt(null);
     setApprovalIssues([]);
     setViewMode('segment');
+    setReviewedRegionIds([]);
     setStatus('Choose the next paper to begin.');
     setTimeout(() => fileInputRef.current?.click(), 0);
   }
@@ -1340,6 +1357,34 @@ function App() {
 
   const selectedRegion = regions.find((region) => region.id === selectedQuestionId) || null;
   const selectedRegionIndex = regions.findIndex((region) => region.id === selectedQuestionId);
+  const selectedLine = lines.find((line) => line.id === selectedLineId) || null;
+  const selectedLineOwner = selectedLine ? regions.find((region) =>
+    region.start.id === selectedLine.id || region.end.id === selectedLine.id || within(selectedLine, region.start, region.end)
+  ) : null;
+
+  useEffect(() => {
+    if (viewMode !== 'preview' || !selectedRegion?.id) return;
+    setReviewedRegionIds((current) => current.includes(selectedRegion.id) ? current : [...current, selectedRegion.id]);
+  }, [viewMode, selectedRegion?.id]);
+
+  useEffect(() => {
+    function isTypingTarget(target) {
+      const tag = target?.tagName?.toLowerCase();
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable;
+    }
+    function handlePreviewKeys(event) {
+      if (viewMode !== 'preview' || isTypingTarget(event.target) || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key === 'ArrowLeft' && selectedRegionIndex > 0) {
+        setSelectedQuestionId(regions[selectedRegionIndex - 1].id);
+        event.preventDefault();
+      } else if (event.key === 'ArrowRight' && selectedRegionIndex >= 0 && selectedRegionIndex < regions.length - 1) {
+        setSelectedQuestionId(regions[selectedRegionIndex + 1].id);
+        event.preventDefault();
+      }
+    }
+    window.addEventListener('keydown', handlePreviewKeys);
+    return () => window.removeEventListener('keydown', handlePreviewKeys);
+  }, [viewMode, selectedRegionIndex, regions]);
 
   function validateSegmentation() {
     const issues = [];
@@ -1533,39 +1578,27 @@ function App() {
 
   return (
     <div className="app-shell" onDragOver={allowFileDrop} onDrop={handleFileDrop}>
-      {resumePromptOpen && resumeDraft && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(15, 23, 42, 0.48)', display: 'grid', placeItems: 'center', padding: 24 }}>
-          <div role="dialog" aria-modal="true" aria-labelledby="resume-work-title" style={{ width: 'min(520px, 94vw)', background: '#fff', borderRadius: 18, boxShadow: '0 24px 70px rgba(15,23,42,.24)', padding: 24 }}>
-            <p className="eyebrow" style={{ marginTop: 0 }}>Saved on this computer</p>
-            <h2 id="resume-work-title" style={{ margin: '4px 0 8px' }}>Continue where you left off?</h2>
-            <p style={{ margin: '0 0 6px', color: '#475467' }}><strong>{resumeDraft.fileName || 'Previous paper'}</strong></p>
-            <p style={{ margin: '0 0 20px', color: '#667085', fontSize: '0.9rem' }}>Last saved {new Date(resumeDraft.savedAt || Date.now()).toLocaleString()}. The PDF and all crop lines, labels, exclusions and layout work were saved locally in this browser on this computer.</p>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              <button type="button" className="ghost" onClick={discardSavedWork}>Discard & start fresh</button>
-              <button type="button" className="primary" onClick={resumeSavedWork}>Continue saved work</button>
-            </div>
-          </div>
-        </div>
-      )}
       <header className="topbar">
-        <div>
+        <div className="topbar-copy">
           <p className="eyebrow">Local browser tool</p>
           <h1>{workflowKind === 'solutions' ? 'Prelim Solution Cropper' : 'Prelim Cropper'}</h1>
           <p className="subtitle">{workflowKind === 'solutions' ? `Match the solution file to the ${questionPayload?.questions?.length || 0} approved question parents, then review the solution crops.` : 'Prepare the paper, check questions and parts, then review worksheet pages.'}</p>
+          {file && <div className="context-strip"><strong>{workflowKind === 'solutions' ? 'Solutions' : 'Question paper'}</strong><span>{file.name}</span>{workflowKind === 'solutions' && questionPayload?.sourceFile && <span className="context-authority">Matched to {questionPayload.sourceFile}</span>}</div>}
         </div>
         {file && lastLocalSaveAt && <div style={{ marginLeft: 'auto', marginRight: '12px', alignSelf: 'center', fontSize: '0.78rem', color: '#667085', whiteSpace: 'nowrap' }}>Saved locally {new Date(lastLocalSaveAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>}
         {file && <button className="primary" onClick={workflowKind === 'solutions' && solutionJsonSaved ? uploadAnotherPaper : () => fileInputRef.current?.click()} disabled={loading}>{workflowKind === 'solutions' && solutionJsonSaved ? 'Upload another paper' : `Change ${workflowKind === 'solutions' ? 'solution' : 'files'}`}</button>}
         <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf,application/json,.json" multiple onChange={(e) => handleIntakeFiles(e.target.files)} />
       </header>
+      {statusVisible && status && <div className={`status-toast ${/cannot|could not|fix|missing|different|expected|failed|please/i.test(status) ? 'alert' : 'ok'}`} role="status"><span>{/cannot|could not|fix|missing|different|expected|failed|please/i.test(status) ? '!' : '✓'}</span><p>{status}</p><button type="button" aria-label="Dismiss message" onClick={() => setStatusVisible(false)}>×</button></div>}
 
       <main className={`workspace ${viewMode === 'preview' ? 'preview-mode-shell' : ''}`}>
         <aside className="controls-card">
           <nav className="workflow-stepper" aria-label="Workflow">
-            <div className={`workflow-step ${file ? 'done' : 'active'}`}><span>{file ? '✓' : '1'}</span><small>Clean</small></div>
-            <div className={`workflow-step ${file && !regions.length && viewMode === 'segment' ? 'active' : regions.length ? 'done' : ''}`}><span>{regions.length ? '✓' : '2'}</span><small>Questions</small></div>
-            <div className={`workflow-step ${regions.length && viewMode === 'segment' && !segmentationApproved ? 'active' : segmentationApproved ? 'done' : ''}`}><span>{segmentationApproved ? '✓' : '3'}</span><small>Parts</small></div>
-            <div className={`workflow-step ${viewMode === 'preview' ? 'active' : ''}`}><span>4</span><small>Layout</small></div>
-            <div className="workflow-step"><span>5</span><small>Save</small></div>
+            <div className={`workflow-step ${file ? 'done' : 'active'}`}><span>{file ? '✓' : '1'}</span><small>Upload</small></div>
+            <div className={`workflow-step ${file && !regions.length && viewMode === 'segment' ? 'active' : regions.length ? 'done' : ''}`}><span>{regions.length ? '✓' : '2'}</span><small>{workflowKind === 'solutions' ? 'Match' : 'Detect'}</small></div>
+            <div className={`workflow-step ${regions.length && viewMode === 'segment' && !segmentationApproved ? 'active' : segmentationApproved ? 'done' : ''}`}><span>{segmentationApproved ? '✓' : '3'}</span><small>Check</small></div>
+            <div className={`workflow-step ${viewMode === 'preview' ? 'active' : ''}`}><span>{viewMode === 'preview' && reviewedRegionIds.length >= regions.length && regions.length ? '✓' : '4'}</span><small>Layout</small></div>
+            <div className={`workflow-step ${(questionPayload && workflowKind === 'questions') || solutionJsonSaved ? 'done' : viewMode === 'preview' ? 'active' : ''}`}><span>{(questionPayload && workflowKind === 'questions') || solutionJsonSaved ? '✓' : '5'}</span><small>Save</small></div>
           </nav>
 
           {viewMode === 'segment' ? (
@@ -1625,12 +1658,14 @@ function App() {
                 {!!regions.length && segmentationApproved && <p className="review-progress-copy approval-ok">✓ Questions and parts approved</p>}
                 <div className="region-list question-list">
                   {regions.map((region) => {
-                    const partCount = region.segments.filter((segment) => segment.isPart !== false).length;
+                    const partSegments = region.segments.filter((segment) => segment.isPart !== false);
+                    const partCount = partSegments.length;
+                    const partLabels = partSegments.map((segment) => String(segment.label || '').replace(new RegExp(`^${region.label}\\s*`, 'i'), '')).filter(Boolean);
                     const hasIssue = issueRegionIds.has(region.id);
                     return (
-                      <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => jumpToQuestion(region.id)}>
-                        <span className="region-main"><span className={`qa-dot ${hasIssue ? 'warn' : 'ok'}`}>{hasIssue ? '!' : '✓'}</span><span className="region-name">{region.label}</span></span>
-                        <span className={`region-status ${hasIssue ? 'warn' : 'ok'}`}>{hasIssue ? 'check' : `${partCount} part${partCount === 1 ? '' : 's'}`}</span>
+                      <button key={region.id} className={`region-row richer-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => jumpToQuestion(region.id)}>
+                        <span className="region-main"><span className={`qa-dot ${hasIssue ? 'warn' : 'ok'}`}>{hasIssue ? '!' : '✓'}</span><span className="region-row-copy"><span className="region-name">{region.label}</span><small title={partLabels.join(' · ')}>{partLabels.length ? partLabels.join(' · ') : 'No parts identified'}</small></span></span>
+                        <span className={`region-status ${hasIssue ? 'warn' : 'ok'}`}>{hasIssue ? 'check' : `${partCount}`}</span>
                       </button>
                     );
                   })}
@@ -1641,7 +1676,7 @@ function App() {
                     <div className="segment-label-list">
                       {selectedRegion.segments.map((segment) => (
                         <button key={segment.id} type="button" className={`segment-label-row ${selectedSegmentId === segment.id ? 'selected' : ''} ${segment.isPart === false ? 'not-part' : ''}`} onClick={() => setSelectedSegmentId(segment.id)}>
-                          <span>{segment.isPart === false ? 'Not a part' : segment.label}</span><small>{segment.isPart === false ? 'excluded' : (segment.labelEditedByUser ? 'edited' : (segment.detectedMarker ? 'detected' : 'check'))}</small>
+                          <span>{segment.isPart === false ? (workflowKind === 'solutions' ? 'Not a solution part' : 'Not a question part') : segment.label}</span><small>{segment.isPart === false ? 'excluded' : (segment.labelEditedByUser ? 'edited' : (segment.detectedMarker ? 'detected' : 'check'))}</small>
                         </button>
                       ))}
                     </div>
@@ -1652,10 +1687,10 @@ function App() {
                         </label>
                         <div className="segment-role-toggle" role="group" aria-label="Segment role">
                           <button type="button" className={segment.isPart !== false ? 'primary' : 'ghost'} onClick={() => updateSegmentPartFlag(segment.id, true)}>{workflowKind === 'solutions' ? 'Solution part' : 'Question part'}</button>
-                          <button type="button" className={segment.isPart === false ? 'not-part-active' : 'ghost'} onClick={() => updateSegmentPartFlag(segment.id, false)}>Not a part</button>
+                          <button type="button" className={segment.isPart === false ? 'not-part-active' : 'ghost'} onClick={() => updateSegmentPartFlag(segment.id, false)}>{workflowKind === 'solutions' ? 'Not a solution part' : 'Not a question part'}</button>
                         </div>
                         {segment.isPart !== false && <p className={`label-evidence ${segment.detectedMarker ? 'detected' : 'uncertain'}`}>{segment.labelEditedByUser ? 'Manual label' : segment.labelEvidence}</p>}
-                        {segment.isPart === false && <p className="small compact-segment-note">Kept inside the whole-question crop, but excluded from part tagging/export.</p>}
+                        {segment.isPart === false && <p className="small compact-segment-note">Kept inside the parent crop, but excluded from part tagging/export.</p>}
                       </div>
                     ))}
                     {selectedSegmentId && segmentLabelOverrides[selectedSegmentId] && <button type="button" className="ghost full" onClick={() => { setSegmentLabelOverrides((current) => { const next = { ...current }; delete next[selectedSegmentId]; return next; }); setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]); }}>Use automatic label</button>}
@@ -1671,12 +1706,11 @@ function App() {
                     <summary>{liveApprovalIssues.length} issue{liveApprovalIssues.length === 1 ? '' : 's'} to fix before approval</summary>
                     <ul>{liveApprovalIssues.slice(0, 5).map((issue, index) => (
                       <li key={`${issue.message}-${index}`}>
-                        <span>{issue.message}</span>
-                        {!!issue.expectedLabels?.length && (
-                          <small style={{ display: 'block', marginTop: 4 }}>
-                            Expected parts: {issue.expectedLabels.join(' · ')}
-                          </small>
-                        )}
+                        <button type="button" className={`issue-jump ${issue.regionId ? 'clickable' : ''}`} onClick={() => issue.regionId && jumpToQuestion(issue.regionId)} disabled={!issue.regionId}>
+                          <span>{issue.message}</span>
+                          {!!issue.expectedLabels?.length && <small>Expected parts: {issue.expectedLabels.join(' · ')}</small>}
+                          {issue.regionId && <em>Go to {regions.find((region) => region.id === issue.regionId)?.label || 'question'} →</em>}
+                        </button>
                       </li>
                     ))}</ul>
                     {liveApprovalIssues.length > 5 && <small>+ {liveApprovalIssues.length - 5} more</small>}
@@ -1688,29 +1722,32 @@ function App() {
           ) : (
             <>
               <section className="compact-section"><button className="ghost full" onClick={() => setViewMode('segment')}>← Back to questions</button></section>
-              <section className="compact-section"><h2>{workflowKind === 'solutions' ? 'Solution parents' : 'Questions'}</h2><div className="region-list preview-region-list">{regions.map((region) => <button key={region.id} className={`region-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}><span className="region-name">{region.label}</span><span className="region-status ok">approved</span></button>)}</div></section>
-              <section className="compact-section">
+              <section className="compact-section"><div className="section-heading-row"><h2>{workflowKind === 'solutions' ? 'Solution parents' : 'Questions'}</h2><span className="review-count">{reviewedRegionIds.length}/{regions.length} viewed</span></div><div className="region-list preview-region-list">{regions.map((region) => { const visited = reviewedRegionIds.includes(region.id); const current = selectedQuestionId === region.id; return <button key={region.id} className={`region-row ${current ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}><span className="region-name">{region.label}</span><span className={`visit-state ${current ? 'current' : visited ? 'visited' : ''}`}>{current ? '●' : visited ? '✓' : '○'}</span></button>; })}</div></section>
+              <section className="compact-section save-section">
                 <button className="primary full" onClick={exportSegmentation} disabled={!segmentationApproved}>{workflowKind === 'solutions' ? 'Save solution JSON' : 'Save question JSON'}</button>
                 <p className="small">Saves the approved source boundaries and reviewed page layout.</p>
-                {workflowKind === 'questions' && questionPayload && segmentationApproved && <button className="ghost full" type="button" onClick={continueWithSolutions}>Continue with solutions →</button>}
-                {workflowKind === 'solutions' && questionPayload && solutionPayload && segmentationApproved && <button className="ghost full" type="button" onClick={downloadCombinedPackage}>Download both JSONs together</button>}
+                {workflowKind === 'questions' && questionPayload && segmentationApproved && <div className="completion-card"><strong>✓ Question JSON saved</strong><span>{questionPayload.sourceFile || file?.name}</span><button className="ghost full" type="button" onClick={continueWithSolutions}>Continue with solutions →</button><button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
+                {workflowKind === 'solutions' && solutionJsonSaved && <div className="completion-card"><strong>✓ Solution JSON saved</strong><span>{solutionPayload?.sourceFile || file?.name}</span>{questionPayload && solutionPayload && <button className="ghost full" type="button" onClick={downloadCombinedPackage}>Download both JSONs</button>}<button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
               </section>
             </>
           )}
         </aside>
       <section className="document-area">
           {!file && (
-            <div className="empty-state">
-              <div className="empty-icon">PDF</div><h2>{workflowKind === 'solutions' ? 'Choose the matching solution file' : 'Choose files'}</h2>
-              <p>{workflowKind === 'solutions' ? `The question JSON is loaded locally. Choose its solution PDF; it must reconcile to ${questionPayload?.questions?.length || 0} parent questions.` : 'Select one question-paper PDF to start. To continue a paper later, select its saved question JSON and matching solution PDF together.'}</p>
-              <button className="primary" onClick={() => fileInputRef.current?.click()}>Choose {workflowKind === 'solutions' ? 'solution PDF' : 'files'}</button>
-              {workflowKind === 'questions' && <small className="panel-note">Drop files anywhere, or choose them here. One PDF = new question paper · Question JSON + solution PDF = continue automatically.</small>}
+            <div className="empty-state drop-zone" onClick={() => fileInputRef.current?.click()}>
+              {resumePromptOpen && resumeDraft && <div className="resume-card" onClick={(event) => event.stopPropagation()}><div><p className="eyebrow">Recent unfinished work</p><strong>{resumeDraft.fileName || 'Previous paper'}</strong><small>Saved {new Date(resumeDraft.savedAt || Date.now()).toLocaleString()}</small></div><div className="resume-actions"><button type="button" className="ghost" onClick={discardSavedWork}>Start fresh</button><button type="button" className="primary" onClick={resumeSavedWork}>Continue</button></div></div>}
+              <div className="empty-icon">⇩</div><h2>{workflowKind === 'solutions' ? 'Drop the matching solution PDF here' : 'Drop your paper here'}</h2>
+              <p>{workflowKind === 'solutions' ? `The question JSON is ready. Add the solution PDF and it will be matched to ${questionPayload?.questions?.length || 0} parent questions.` : 'The cropper works out what you are trying to do from the files you provide.'}</p>
+              {workflowKind === 'questions' && <div className="intake-guide"><div><strong>PDF only</strong><span>Start a new question paper</span></div><div><strong>PDF + matching JSON</strong><span>Reopen and edit saved boundaries</span></div><div><strong>Question JSON + solution PDF</strong><span>Continue with solutions</span></div></div>}
+              <button className="primary" onClick={(event) => { event.stopPropagation(); fileInputRef.current?.click(); }}>Choose {workflowKind === 'solutions' ? 'solution PDF' : 'files'}</button>
+              <small className="panel-note">You can also drag files anywhere onto this window.</small>
             </div>
           )}
           {loading && <div className="loading-card">Preparing pages…</div>}
           {!!pages.length && !loading && viewMode === 'segment' && (
             <div className="segmentation-workspace">
               <div className="panel-heading"><div><p className="eyebrow">Segmentation</p><h2>Rolling paper</h2></div><span className="panel-note">Focus only on question ownership</span></div>
+              {selectedLine && <div className="selected-line-bar"><strong>Selected: {selectedLine.kind === START ? 'START' : selectedLine.kind === END ? 'END' : 'PART'}{selectedLineOwner ? ` · ${selectedLineOwner.label}` : ''}</strong><span>↑ / ↓ move · Shift = larger move · Delete removes</span></div>}
               <div className="rolling-paper">
                 {pages.map((pageData) => (
                   <PdfPage key={pageData.pageNumber} pageData={pageData} headerPct={headerPct} footerPct={footerPct}
@@ -1731,6 +1768,8 @@ function App() {
               onNext={() => {
                 if (selectedRegionIndex >= 0 && selectedRegionIndex < regions.length - 1) setSelectedQuestionId(regions[selectedRegionIndex + 1].id);
               }}
+              currentIndex={selectedRegionIndex}
+              totalCount={regions.length}
               savedBreaks={selectedRegion ? outputBreaks[selectedRegion.id] : []}
               savedExclusions={selectedRegion ? exclusions[selectedRegion.id] || [] : []}
               globalReviewTrim={globalReviewTrim}
@@ -2081,7 +2120,7 @@ function buildCompactedStrip(strip, exclusions) {
   return { canvas: out, exclusions: normalized, originalToCompacted, compactedToOriginal, joinGapPx };
 }
 
-function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, hasNext, onPrevious, onNext, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, globalReviewTrim, onGlobalReviewTrimChange, trimOverrides, onTrimOverridesChange }) {
+function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, hasNext, onPrevious, onNext, currentIndex, totalCount, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, globalReviewTrim, onGlobalReviewTrimChange, trimOverrides, onTrimOverridesChange }) {
   const [strip, setStrip] = useState(null);
   const [loading, setLoading] = useState(false);
   const [autoBreaks, setAutoBreaks] = useState([]);
@@ -2180,7 +2219,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
         <div className="preview-title-row">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <button type="button" className="ghost compact" onClick={onPrevious} disabled={!hasPrevious} aria-label="Previous question" title="Previous question" style={{ minWidth: 38, fontSize: '1.2rem', lineHeight: 1 }}>←</button>
-            <div><p className="eyebrow">Layout</p><h2>{region.label}</h2></div>
+            <div><p className="eyebrow">Layout · {currentIndex + 1} of {totalCount}</p><h2>{region.label}</h2></div>
             <button type="button" className="ghost compact" onClick={onNext} disabled={!hasNext} aria-label="Next question" title="Next question" style={{ minWidth: 38, fontSize: '1.2rem', lineHeight: 1 }}>→</button>
           </div>
           <p>Use ← / → to review adjacent questions. Drag purple page breaks. Use <strong>X</strong> to remove unwanted blank space.</p>
@@ -2230,11 +2269,11 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
 
       <div className="preview-grid">
         <div className="layout-editor-panel">
-          <div className="panel-heading compact-panel-heading"><div><h3>Full question</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} removed</span></div>
+          <div className="panel-heading compact-panel-heading"><div><h3>Edit crop</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} removed</span></div>
           <StripBreakEditor strip={strip} breaks={savedBreaks || []} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} />
         </div>
         <div className="final-pages-panel">
-          <div className="panel-heading compact-panel-heading"><div><h3>Worksheet pages</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div></div>
+          <div className="panel-heading compact-panel-heading"><div><h3>Output preview</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div></div>
           <div className="final-page-list">
             {finalPages.map((src, index) => <div className="preview-page-card" key={`${region.id}-${index}`}><span>Page {index + 1}</span><img src={src} alt={`${region.label} final page ${index + 1}`} /></div>)}
           </div>
