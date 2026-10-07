@@ -14,6 +14,66 @@ const PART = 'part';
 const PAGE_CONTENT_WIDTH = 706;
 const PAGE_CONTENT_HEIGHT = 1035;
 
+const LOCAL_DRAFT_DB = 'prelim-cropper-local-v1';
+const LOCAL_DRAFT_STORE = 'drafts';
+const LOCAL_DRAFT_KEY = 'active-work';
+
+function openDraftDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(LOCAL_DRAFT_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(LOCAL_DRAFT_STORE)) db.createObjectStore(LOCAL_DRAFT_STORE, { keyPath: 'id' });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function readLocalDraft() {
+  const db = await openDraftDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(LOCAL_DRAFT_STORE, 'readonly');
+      const request = tx.objectStore(LOCAL_DRAFT_STORE).get(LOCAL_DRAFT_KEY);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function writeLocalDraft(draft) {
+  const db = await openDraftDb();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(LOCAL_DRAFT_STORE, 'readwrite');
+      tx.objectStore(LOCAL_DRAFT_STORE).put({ ...draft, id: LOCAL_DRAFT_KEY });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function clearLocalDraft() {
+  const db = await openDraftDb();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(LOCAL_DRAFT_STORE, 'readwrite');
+      tx.objectStore(LOCAL_DRAFT_STORE).delete(LOCAL_DRAFT_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
 function makeId(prefix) {
   return `${prefix}-${crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`}`;
 }
@@ -203,8 +263,38 @@ function App() {
   const [questionPayload, setQuestionPayload] = useState(null);
   const [solutionPayload, setSolutionPayload] = useState(null);
   const fileInputRef = useRef(null);
+  const restoringDraftRef = useRef(false);
+  const [resumeDraft, setResumeDraft] = useState(null);
+  const [resumePromptOpen, setResumePromptOpen] = useState(false);
+  const [lastLocalSaveAt, setLastLocalSaveAt] = useState(null);
 
   useEffect(() => () => { if (pdf) pdf.destroy(); }, [pdf]);
+
+  useEffect(() => {
+    let cancelled = false;
+    readLocalDraft()
+      .then((draft) => {
+        if (cancelled || !draft?.fileBlob) return;
+        setResumeDraft(draft);
+        setResumePromptOpen(true);
+      })
+      .catch((error) => console.warn('Could not read local cropper draft.', error));
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!file || !pages.length || loading || restoringDraftRef.current) return undefined;
+    const timer = window.setTimeout(() => {
+      saveWorkLocally().catch((error) => console.warn('Could not autosave local cropper draft.', error));
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    file, pages.length, loading, workflowKind, headerPct, footerPct, lines, lineMode,
+    showGuides, selectedQuestionId, selectedLineId, selectedSegmentId,
+    segmentLabelOverrides, segmentPartFlags, lastSuggestionIds, viewMode, outputBreaks,
+    exclusions, trimOverrides, globalReviewTrim, segmentationApproved,
+    segmentationApprovedAt, approvalIssues, questionPayload, solutionPayload,
+  ]);
 
   useEffect(() => {
     function keyToMode(key) {
@@ -263,7 +353,7 @@ function App() {
     };
   }, [selectedLineId, headerPct, footerPct, viewMode]);
 
-  async function openPdf(selected, kindOverride = workflowKind) {
+  async function openPdf(selected, kindOverride = workflowKind, restoreSnapshot = null) {
     if (!selected) return;
     setLoading(true);
     setStatus('Loading PDF…');
@@ -292,9 +382,36 @@ function App() {
       }
       nextPages.forEach((pageData) => { pageData.rows = extractTextRows(pageData); });
       setPages(nextPages);
-      setStatus(kindOverride === 'solutions'
-        ? `${loadedPdf.numPages} solution pages loaded. Detect solution blocks, then reconcile them against the approved question list.`
-        : `${loadedPdf.numPages} pages loaded. Detect questions & parts, then scan the proposed starts, ends and part lines.`);
+      if (restoreSnapshot) {
+        setWorkflowKind(restoreSnapshot.workflowKind || kindOverride || 'questions');
+        setHeaderPct(Number.isFinite(restoreSnapshot.headerPct) ? restoreSnapshot.headerPct : 6);
+        setFooterPct(Number.isFinite(restoreSnapshot.footerPct) ? restoreSnapshot.footerPct : 6);
+        setLines(Array.isArray(restoreSnapshot.lines) ? restoreSnapshot.lines : []);
+        setLineMode(restoreSnapshot.lineMode || START);
+        setShowGuides(restoreSnapshot.showGuides !== false);
+        setSelectedQuestionId(restoreSnapshot.selectedQuestionId || null);
+        setSelectedLineId(restoreSnapshot.selectedLineId || null);
+        setSelectedSegmentId(restoreSnapshot.selectedSegmentId || null);
+        setSegmentLabelOverrides(restoreSnapshot.segmentLabelOverrides || {});
+        setSegmentPartFlags(restoreSnapshot.segmentPartFlags || {});
+        setLastSuggestionIds(Array.isArray(restoreSnapshot.lastSuggestionIds) ? restoreSnapshot.lastSuggestionIds : []);
+        setViewMode(restoreSnapshot.viewMode === 'preview' ? 'preview' : 'segment');
+        setOutputBreaks(restoreSnapshot.outputBreaks || {});
+        setExclusions(restoreSnapshot.exclusions || {});
+        setTrimOverrides(restoreSnapshot.trimOverrides || {});
+        setGlobalReviewTrim(restoreSnapshot.globalReviewTrim || { topExtra: 0, bottomExtra: 0 });
+        setSegmentationApproved(Boolean(restoreSnapshot.segmentationApproved));
+        setSegmentationApprovedAt(restoreSnapshot.segmentationApprovedAt || null);
+        setApprovalIssues(Array.isArray(restoreSnapshot.approvalIssues) ? restoreSnapshot.approvalIssues : []);
+        setQuestionPayload(restoreSnapshot.questionPayload || null);
+        setSolutionPayload(restoreSnapshot.solutionPayload || null);
+        setLastLocalSaveAt(restoreSnapshot.savedAt || null);
+        setStatus(`Restored local work from ${new Date(restoreSnapshot.savedAt || Date.now()).toLocaleString()}. Continue from where you left off.`);
+      } else {
+        setStatus(kindOverride === 'solutions'
+          ? `${loadedPdf.numPages} solution pages loaded. Detect solution blocks, then reconcile them against the approved question list.`
+          : `${loadedPdf.numPages} pages loaded. Detect questions & parts, then scan the proposed starts, ends and part lines.`);
+      }
     } catch (error) {
       console.error(error);
       setStatus('Could not open this PDF. Please try another file.');
@@ -304,6 +421,77 @@ function App() {
     }
   }
 
+
+  function buildLocalDraftSnapshot() {
+    if (!file || !pages.length) return null;
+    return {
+      savedAt: new Date().toISOString(),
+      fileBlob: file,
+      fileName: file.name,
+      fileType: file.type || 'application/pdf',
+      workflowKind,
+      headerPct,
+      footerPct,
+      lines,
+      lineMode,
+      showGuides,
+      selectedQuestionId,
+      selectedLineId,
+      selectedSegmentId,
+      segmentLabelOverrides,
+      segmentPartFlags,
+      lastSuggestionIds,
+      viewMode,
+      outputBreaks,
+      exclusions,
+      trimOverrides,
+      globalReviewTrim,
+      segmentationApproved,
+      segmentationApprovedAt,
+      approvalIssues,
+      questionPayload,
+      solutionPayload,
+    };
+  }
+
+  async function saveWorkLocally() {
+    const snapshot = buildLocalDraftSnapshot();
+    if (!snapshot) return;
+    await writeLocalDraft(snapshot);
+    setLastLocalSaveAt(snapshot.savedAt);
+    setResumeDraft(snapshot);
+  }
+
+  async function resumeSavedWork() {
+    if (!resumeDraft?.fileBlob) return;
+    setResumePromptOpen(false);
+    restoringDraftRef.current = true;
+    try {
+      const sourceBlob = resumeDraft.fileBlob;
+      const restoredFile = sourceBlob instanceof File
+        ? sourceBlob
+        : new File([sourceBlob], resumeDraft.fileName || 'restored-paper.pdf', { type: resumeDraft.fileType || 'application/pdf' });
+      await openPdf(restoredFile, resumeDraft.workflowKind || 'questions', resumeDraft);
+    } catch (error) {
+      console.error(error);
+      setStatus('The locally saved session could not be restored. You can discard it and start again.');
+      setResumePromptOpen(true);
+    } finally {
+      restoringDraftRef.current = false;
+    }
+  }
+
+  async function discardSavedWork() {
+    try {
+      await clearLocalDraft();
+    } catch (error) {
+      console.warn('Could not clear local cropper draft.', error);
+    }
+    setResumeDraft(null);
+    setResumePromptOpen(false);
+    setLastLocalSaveAt(null);
+    setStatus('Choose a PDF to begin.');
+  }
 
   async function parseQuestionJson(selected) {
     const text = await selected.text();
@@ -1146,12 +1334,27 @@ function App() {
 
   return (
     <div className="app-shell" onDragOver={allowFileDrop} onDrop={handleFileDrop}>
+      {resumePromptOpen && resumeDraft && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(15, 23, 42, 0.48)', display: 'grid', placeItems: 'center', padding: 24 }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="resume-work-title" style={{ width: 'min(520px, 94vw)', background: '#fff', borderRadius: 18, boxShadow: '0 24px 70px rgba(15,23,42,.24)', padding: 24 }}>
+            <p className="eyebrow" style={{ marginTop: 0 }}>Saved on this computer</p>
+            <h2 id="resume-work-title" style={{ margin: '4px 0 8px' }}>Continue where you left off?</h2>
+            <p style={{ margin: '0 0 6px', color: '#475467' }}><strong>{resumeDraft.fileName || 'Previous paper'}</strong></p>
+            <p style={{ margin: '0 0 20px', color: '#667085', fontSize: '0.9rem' }}>Last saved {new Date(resumeDraft.savedAt || Date.now()).toLocaleString()}. The PDF and all crop lines, labels, exclusions and layout work were saved locally in this browser on this computer.</p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <button type="button" className="ghost" onClick={discardSavedWork}>Discard & start fresh</button>
+              <button type="button" className="primary" onClick={resumeSavedWork}>Continue saved work</button>
+            </div>
+          </div>
+        </div>
+      )}
       <header className="topbar">
         <div>
           <p className="eyebrow">Local browser tool</p>
           <h1>{workflowKind === 'solutions' ? 'Prelim Solution Cropper' : 'Prelim Cropper'}</h1>
           <p className="subtitle">{workflowKind === 'solutions' ? `Match the solution file to the ${questionPayload?.questions?.length || 0} approved question parents, then review the solution crops.` : 'Prepare the paper, check questions and parts, then review worksheet pages.'}</p>
         </div>
+        {file && lastLocalSaveAt && <div style={{ marginLeft: 'auto', marginRight: '12px', alignSelf: 'center', fontSize: '0.78rem', color: '#667085', whiteSpace: 'nowrap' }}>Saved locally {new Date(lastLocalSaveAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>}
         {file && <button className="primary" onClick={() => fileInputRef.current?.click()} disabled={loading}>Change {workflowKind === 'solutions' ? 'solution' : 'files'}</button>}
         <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf,application/json,.json" multiple onChange={(e) => handleIntakeFiles(e.target.files)} />
       </header>
