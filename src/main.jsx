@@ -13,6 +13,7 @@ const END = 'question-end';
 const PART = 'part';
 const PAGE_CONTENT_WIDTH = 706;
 const PAGE_CONTENT_HEIGHT = 1035;
+const APP_VERSION = '0.9.0-trial';
 
 const LOCAL_DRAFT_DB = 'prelim-cropper-local-v1';
 const LOCAL_DRAFT_STORE = 'drafts';
@@ -270,6 +271,24 @@ function App() {
   const [lastLocalSaveAt, setLastLocalSaveAt] = useState(null);
   const [statusVisible, setStatusVisible] = useState(false);
   const [reviewedRegionIds, setReviewedRegionIds] = useState([]);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [pendingMismatch, setPendingMismatch] = useState(null);
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const [downloadBaselineFingerprint, setDownloadBaselineFingerprint] = useState(null);
+  const historyRef = useRef([]);
+  const redoRef = useRef([]);
+  const lastHistoryFingerprintRef = useRef(null);
+  const applyingHistoryRef = useRef(false);
+  const baselinePendingRef = useRef(false);
+
+  const editableSnapshot = useMemo(() => ({
+    headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks,
+    exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt,
+  }), [headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks, exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt]);
+  const currentEditFingerprint = useMemo(() => JSON.stringify(editableSnapshot), [editableSnapshot]);
+  const jsonState = !file ? null : downloadBaselineFingerprint == null
+    ? 'not-downloaded'
+    : (downloadBaselineFingerprint === currentEditFingerprint ? 'up-to-date' : 'changed');
 
   useEffect(() => () => { if (pdf) pdf.destroy(); }, [pdf]);
 
@@ -308,6 +327,66 @@ function App() {
   ]);
 
   useEffect(() => {
+    if (!file || !pages.length || loading || restoringDraftRef.current) return;
+    const previous = lastHistoryFingerprintRef.current;
+    if (applyingHistoryRef.current) {
+      applyingHistoryRef.current = false;
+      lastHistoryFingerprintRef.current = currentEditFingerprint;
+      setHistoryVersion((value) => value + 1);
+      return;
+    }
+    if (previous && previous !== currentEditFingerprint) {
+      historyRef.current.push(JSON.parse(previous));
+      if (historyRef.current.length > 50) historyRef.current.shift();
+      redoRef.current = [];
+      setHistoryVersion((value) => value + 1);
+    }
+    lastHistoryFingerprintRef.current = currentEditFingerprint;
+  }, [currentEditFingerprint, file, pages.length, loading]);
+
+  useEffect(() => {
+    if (!baselinePendingRef.current || !file || !pages.length || loading) return;
+    baselinePendingRef.current = false;
+    setDownloadBaselineFingerprint(currentEditFingerprint);
+  }, [currentEditFingerprint, file, pages.length, loading]);
+
+  function applyEditableSnapshot(snapshot) {
+    if (!snapshot) return;
+    setHeaderPct(snapshot.headerPct ?? 6);
+    setFooterPct(snapshot.footerPct ?? 6);
+    setLines(Array.isArray(snapshot.lines) ? snapshot.lines : []);
+    setSegmentLabelOverrides(snapshot.segmentLabelOverrides || {});
+    setSegmentPartFlags(snapshot.segmentPartFlags || {});
+    setOutputBreaks(snapshot.outputBreaks || {});
+    setExclusions(snapshot.exclusions || {});
+    setTrimOverrides(snapshot.trimOverrides || {});
+    setGlobalReviewTrim(snapshot.globalReviewTrim || { topExtra: 0, bottomExtra: 0 });
+    setSegmentationApproved(Boolean(snapshot.segmentationApproved));
+    setSegmentationApprovedAt(snapshot.segmentationApprovedAt || null);
+    setApprovalIssues([]);
+  }
+
+  function undoEdit() {
+    if (!historyRef.current.length) return;
+    const previous = historyRef.current.pop();
+    redoRef.current.push(JSON.parse(currentEditFingerprint));
+    applyingHistoryRef.current = true;
+    applyEditableSnapshot(previous);
+    setHistoryVersion((value) => value + 1);
+    setStatus('Undid the last edit.');
+  }
+
+  function redoEdit() {
+    if (!redoRef.current.length) return;
+    const next = redoRef.current.pop();
+    historyRef.current.push(JSON.parse(currentEditFingerprint));
+    applyingHistoryRef.current = true;
+    applyEditableSnapshot(next);
+    setHistoryVersion((value) => value + 1);
+    setStatus('Redid the edit.');
+  }
+
+  useEffect(() => {
     function keyToMode(key) {
       const lower = key.toLowerCase();
       if (lower === 's') return START;
@@ -320,7 +399,19 @@ function App() {
       return tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable;
     }
     function handleShortcutDown(event) {
-      if (event.ctrlKey || event.metaKey || event.altKey || isTypingTarget(event.target)) return;
+      const modifier = event.ctrlKey || event.metaKey;
+      if (modifier && !event.altKey && !isTypingTarget(event.target)) {
+        const lower = event.key.toLowerCase();
+        if (lower === 'z' && !event.shiftKey) { undoEdit(); event.preventDefault(); return; }
+        if (lower === 'y' || (lower === 'z' && event.shiftKey)) { redoEdit(); event.preventDefault(); return; }
+      }
+      if (event.altKey || isTypingTarget(event.target)) return;
+      if (event.key === 'Escape') {
+        setSelectedLineId(null);
+        setSelectedSegmentId(null);
+        event.preventDefault();
+        return;
+      }
       if (viewMode !== 'segment') return;
 
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedLineId) {
@@ -368,6 +459,12 @@ function App() {
     if (!selected) return;
     setLoading(true);
     setStatus('Loading PDF…');
+    historyRef.current = [];
+    redoRef.current = [];
+    lastHistoryFingerprintRef.current = null;
+    setHistoryVersion((value) => value + 1);
+    baselinePendingRef.current = Boolean(restoreSnapshot?._fromSegmentationJson);
+    setDownloadBaselineFingerprint(restoreSnapshot?.downloadBaselineFingerprint || null);
     setFile(selected);
     setLines([]);
     setLastSuggestionIds([]);
@@ -468,6 +565,7 @@ function App() {
       solutionPayload,
       solutionJsonSaved,
       reviewedRegionIds,
+      downloadBaselineFingerprint,
     };
   }
 
@@ -635,6 +733,7 @@ function App() {
       solutionPayload: solutionPayloadForSnapshot,
       solutionJsonSaved: false,
       reviewedRegionIds: [],
+      _fromSegmentationJson: true,
       savedAt: new Date().toISOString(),
     };
   }
@@ -705,7 +804,8 @@ function App() {
 
         if (parsed.kind === 'solutions') {
           if (!sourceMatches) {
-            setStatus(`This solution JSON was saved for ${payload.sourceFile || 'a different solution PDF'}. Please pair it with that solution file so the stored boundaries map to the correct pages.`);
+            setPendingMismatch({ kind: 'solutions', pdfFile: pdfFiles[0], payload });
+            setStatus('The solution PDF filename does not match the source recorded in this JSON. Confirm the pairing before continuing.');
             return;
           }
           const snapshot = snapshotFromSegmentationPayload(payload, 'solutions');
@@ -725,11 +825,11 @@ function App() {
           return;
         }
 
-        // A question JSON paired with a different PDF is the normal continuation
-        // workflow: the other PDF is assumed to be the solution document.
-        const count = resetForSolutionIntake(payload);
-        setStatus(`Question JSON recognised. Loading the other PDF as the solution and reconciling it against ${count} parent questions…`);
-        await openPdf(pdfFiles[0], 'solutions');
+        // A different filename is usually the normal continuation into solutions,
+        // but it can also be a renamed copy of the original question paper. Ask
+        // rather than silently guessing.
+        setPendingMismatch({ kind: 'question-or-solution', pdfFile: pdfFiles[0], payload });
+        setStatus('The PDF filename differs from the source recorded in the question JSON. Choose whether this is the solution file or a renamed question paper.');
         return;
       }
 
@@ -758,6 +858,28 @@ function App() {
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
+  }
+
+  async function resolvePendingMismatch(action) {
+    const pending = pendingMismatch;
+    if (!pending) return;
+    setPendingMismatch(null);
+    if (action === 'cancel') { setStatus('Choose the correct file pair when ready.'); return; }
+    if (pending.kind === 'solutions') {
+      const snapshot = snapshotFromSegmentationPayload(pending.payload, 'solutions');
+      await openPdf(pending.pdfFile, 'solutions', snapshot);
+      setStatus('Opened the solution despite the filename mismatch. Verify the first and last boundaries carefully before approval.');
+      return;
+    }
+    if (action === 'reopen-question') {
+      const snapshot = snapshotFromSegmentationPayload(pending.payload, 'questions');
+      await openPdf(pending.pdfFile, 'questions', snapshot);
+      setStatus('Opened the PDF as a renamed question paper. Verify that the saved boundaries align before approval.');
+      return;
+    }
+    const count = resetForSolutionIntake(pending.payload);
+    await openPdf(pending.pdfFile, 'solutions');
+    setStatus(`Loaded the PDF as the solution and will reconcile it against ${count} parent questions.`);
   }
 
   function safeY(yNorm) {
@@ -1276,10 +1398,12 @@ function App() {
       setSolutionPayload(payload);
       setSolutionJsonSaved(true);
       downloadJson(payload, `${base}.solutions.json`);
+      setDownloadBaselineFingerprint(currentEditFingerprint);
       setStatus('Solution JSON saved and matched to the approved question list. You can now download the combined package.');
     } else {
       setQuestionPayload(payload);
       downloadJson(payload, `${base}.segmentation.json`);
+      setDownloadBaselineFingerprint(currentEditFingerprint);
       setStatus('Question JSON saved. Continue with the solution file when ready.');
     }
   }
@@ -1353,6 +1477,44 @@ function App() {
     const base = (questionPayload.sourceFile || 'prelim-paper').replace(/\.pdf$/i, '');
     downloadJson(bundle, `${base}.question-solution-bundle.json`);
     setStatus('Combined question + solution segmentation package downloaded.');
+  }
+
+  function exportTroubleshootingFile() {
+    const diagnostic = {
+      schemaVersion: 1,
+      type: 'prelim-cropper-diagnostic',
+      appVersion: APP_VERSION,
+      exportedAt: new Date().toISOString(),
+      browser: navigator.userAgent,
+      workflowKind,
+      sourceFileName: file?.name || null,
+      sourceQuestionFileName: questionPayload?.sourceFile || null,
+      pageCount: pages.length,
+      viewMode,
+      headerPct, footerPct,
+      boundaryCounts: { start: lines.filter((line) => line.kind === START).length, end: lines.filter((line) => line.kind === END).length, part: lines.filter((line) => line.kind === PART).length },
+      lines: lines.map(({ id, page, y, kind, label, manualLabel, source }) => ({ id, page, y, kind, label, manualLabel, source })),
+      segmentLabelOverrides, segmentPartFlags, outputBreaks, exclusions, trimOverrides, globalReviewTrim,
+      segmentationApproved, segmentationApprovedAt,
+      validationIssues: validateSegmentation().map(({ type, regionId, message, expectedLabels }) => ({ type, regionId, message, expectedLabels })),
+      reviewedRegionIds,
+      jsonState,
+      localSaveAt: lastLocalSaveAt,
+      note: 'Diagnostic metadata only. PDF page contents and extracted text are not included.',
+    };
+    const base = (file?.name || 'prelim-cropper').replace(/\.pdf$/i, '');
+    downloadJson(diagnostic, `${base}.cropper-diagnostic.json`);
+    setStatus('Troubleshooting file downloaded. It contains cropper state and diagnostics, not the PDF contents.');
+  }
+
+  async function resetCurrentPaper() {
+    if (!file) return;
+    const confirmed = window.confirm('Reset this paper? This clears the current boundaries, labels, exclusions and layout edits for this PDF. Downloaded JSON files are not affected.');
+    if (!confirmed) return;
+    const currentFile = file;
+    const kind = workflowKind;
+    await openPdf(currentFile, kind);
+    setStatus('This paper has been reset to a fresh crop. Run detection again when ready.');
   }
 
   const selectedRegion = regions.find((region) => region.id === selectedQuestionId) || null;
@@ -1580,16 +1742,19 @@ function App() {
     <div className="app-shell" onDragOver={allowFileDrop} onDrop={handleFileDrop}>
       <header className="topbar">
         <div className="topbar-copy">
-          <p className="eyebrow">Local browser tool</p>
+          <p className="eyebrow">Local browser tool · v{APP_VERSION}</p>
           <h1>{workflowKind === 'solutions' ? 'Prelim Solution Cropper' : 'Prelim Cropper'}</h1>
           <p className="subtitle">{workflowKind === 'solutions' ? `Match the solution file to the ${questionPayload?.questions?.length || 0} approved question parents, then review the solution crops.` : 'Prepare the paper, check questions and parts, then review worksheet pages.'}</p>
           {file && <div className="context-strip"><strong>{workflowKind === 'solutions' ? 'Solutions' : 'Question paper'}</strong><span>{file.name}</span>{workflowKind === 'solutions' && questionPayload?.sourceFile && <span className="context-authority">Matched to {questionPayload.sourceFile}</span>}</div>}
         </div>
-        {file && lastLocalSaveAt && <div style={{ marginLeft: 'auto', marginRight: '12px', alignSelf: 'center', fontSize: '0.78rem', color: '#667085', whiteSpace: 'nowrap' }}>Saved locally {new Date(lastLocalSaveAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>}
+        {file && <div className="topbar-work-state"><span className="local-save-state">{lastLocalSaveAt ? `Saved locally ${new Date(lastLocalSaveAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Autosave pending'}</span><span className={`json-save-state ${jsonState || ''}`}>{jsonState === 'changed' ? '● Changes since last JSON' : jsonState === 'up-to-date' ? '✓ JSON up to date' : '○ JSON not yet downloaded'}</span></div>}
+        {file && <div className="topbar-tools"><button className="ghost compact" type="button" onClick={undoEdit} disabled={!historyRef.current.length} title="Undo (Ctrl+Z)">↶ Undo</button><button className="ghost compact" type="button" onClick={redoEdit} disabled={!redoRef.current.length} title="Redo (Ctrl+Y)">↷ Redo</button><button className="ghost compact" type="button" onClick={() => setHelpOpen(true)}>?</button></div>}
         {file && <button className="primary" onClick={workflowKind === 'solutions' && solutionJsonSaved ? uploadAnotherPaper : () => fileInputRef.current?.click()} disabled={loading}>{workflowKind === 'solutions' && solutionJsonSaved ? 'Upload another paper' : `Change ${workflowKind === 'solutions' ? 'solution' : 'files'}`}</button>}
         <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf,application/json,.json" multiple onChange={(e) => handleIntakeFiles(e.target.files)} />
       </header>
       {statusVisible && status && <div className={`status-toast ${/cannot|could not|fix|missing|different|expected|failed|please/i.test(status) ? 'alert' : 'ok'}`} role="status"><span>{/cannot|could not|fix|missing|different|expected|failed|please/i.test(status) ? '!' : '✓'}</span><p>{status}</p><button type="button" aria-label="Dismiss message" onClick={() => setStatusVisible(false)}>×</button></div>}
+      {helpOpen && <div className="modal-backdrop" onMouseDown={() => setHelpOpen(false)}><div className="help-modal" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">Quick help</p><h2>Keyboard & editing</h2></div><button type="button" className="ghost compact" onClick={() => setHelpOpen(false)}>×</button></div><div className="shortcut-grid"><kbd>Click line</kbd><span>Select boundary</span><kbd>Drag line</kbd><span>Move boundary</span><kbd>Double-click</kbd><span>Delete boundary</span><kbd>Delete / Backspace</kbd><span>Delete selected boundary</span><kbd>Ctrl / Cmd + Z</kbd><span>Undo</span><kbd>Ctrl / Cmd + Y</kbd><span>Redo</span><kbd>↑ / ↓</kbd><span>Fine-move selected boundary</span><kbd>← / →</kbd><span>Previous / next question in Layout</span><kbd>S / E / P</kbd><span>Choose START / END / PART tool</span><kbd>Esc</kbd><span>Deselect</span></div><p className="small">Work is autosaved locally in this browser. Download a new JSON after making changes you want to keep outside this computer.</p></div></div>}
+      {pendingMismatch && <div className="modal-backdrop"><div className="help-modal mismatch-modal"><div className="modal-heading"><div><p className="eyebrow">Check file pairing</p><h2>These filenames do not match</h2></div></div><div className="mismatch-files"><span>JSON expects</span><strong>{pendingMismatch.payload?.sourceFile || 'Unknown source PDF'}</strong><span>You selected</span><strong>{pendingMismatch.pdfFile?.name}</strong></div>{pendingMismatch.kind === 'question-or-solution' ? <><p>Is this the solution PDF, or is it a renamed copy of the original question paper?</p><div className="modal-actions stacked-actions"><button className="primary" type="button" onClick={() => resolvePendingMismatch('use-as-solution')}>Use as solution PDF</button><button className="ghost" type="button" onClick={() => resolvePendingMismatch('reopen-question')}>Reopen as renamed question paper</button><button className="ghost" type="button" onClick={() => resolvePendingMismatch('cancel')}>Choose different files</button></div></> : <><p>The saved solution boundaries may not align with this PDF. Continue only if the file was renamed but its pages are unchanged.</p><div className="modal-actions"><button className="ghost" type="button" onClick={() => resolvePendingMismatch('cancel')}>Choose different file</button><button className="primary" type="button" onClick={() => resolvePendingMismatch('continue')}>Open anyway</button></div></>}</div></div>}
 
       <main className={`workspace ${viewMode === 'preview' ? 'preview-mode-shell' : ''}`}>
         <aside className="controls-card">
@@ -1600,6 +1765,8 @@ function App() {
             <div className={`workflow-step ${viewMode === 'preview' ? 'active' : ''}`}><span>{viewMode === 'preview' && reviewedRegionIds.length >= regions.length && regions.length ? '✓' : '4'}</span><small>Layout</small></div>
             <div className={`workflow-step ${(questionPayload && workflowKind === 'questions') || solutionJsonSaved ? 'done' : viewMode === 'preview' ? 'active' : ''}`}><span>{(questionPayload && workflowKind === 'questions') || solutionJsonSaved ? '✓' : '5'}</span><small>Save</small></div>
           </nav>
+
+          {file && <section className="compact-section trial-tools"><div className="trial-tool-row"><button className="ghost compact" type="button" onClick={() => setHelpOpen(true)}>Shortcuts</button><button className="ghost compact" type="button" onClick={exportTroubleshootingFile}>Troubleshooting file</button><button className="ghost compact danger-soft" type="button" onClick={resetCurrentPaper}>Reset paper</button></div></section>}
 
           {viewMode === 'segment' ? (
             <>
