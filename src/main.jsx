@@ -2831,6 +2831,15 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
     if (result.moved) onBreaksChange(result.breaks);
   }
 
+  function removeSelectedBreak() {
+    if (selectedBreakIndex == null || selectedBreakIndex < 0 || selectedBreakIndex >= effectiveOriginalBreaks.length) return;
+    const remaining = effectiveOriginalBreaks.filter((_, index) => index !== selectedBreakIndex);
+    onBreaksChange(remaining);
+    setSelectedBreakIndex(null);
+    setBreakWarning('');
+    setAddBreakMode(false);
+  }
+
   function updateGlobalTrim(field, valuePct) {
     const value = clamp(Number(valuePct) / 100, 0, 0.12);
     onGlobalReviewTrimChange({ ...globalReviewTrim, [field]: value });
@@ -2897,6 +2906,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
           <button className={`ghost compact ${addBreakMode ? 'active-tool' : ''}`} onClick={() => { setAddBreakMode((value) => !value); setExcludeMode(false); }}>{addBreakMode ? 'Click crop to place break' : '+ Add page break'}</button>
           {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(-1)} title="Move selected page break to the previous part boundary">↑ Previous part</button>}
           {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(1)} title="Move selected page break to the next part boundary">↓ Next part</button>}
+          {selectedBreakIndex != null && selectedBreakIndex < effectiveOriginalBreaks.length && <button className="ghost compact" type="button" onClick={removeSelectedBreak} title="Delete the selected purple page break">Remove selected break</button>}
           <button className="ghost compact" onClick={() => { onBreaksChange(autoBreaks); setAddBreakMode(false); setSelectedBreakIndex(null); setBreakWarning(''); }}>Reset smart breaks</button>
         </div>
       </div>
