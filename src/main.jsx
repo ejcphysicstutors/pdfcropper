@@ -2282,6 +2282,23 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
   );
 }
 
+function detectedHeaderCutoff(pageData, configuredTop) {
+  // The crop-review preview must not reintroduce a printed page number that
+  // was already hidden by the paper editor's nominal header crop. Some papers
+  // position this number just below the default 3% trim.
+  const headerNumbers = (pageData.rows || []).filter((row) => {
+    const text = String(row.text || '').trim();
+    const x = Number(row.xNorm);
+    const y = Number(row.yNorm);
+    return /^\d{1,3}$/.test(text) && Number.isFinite(x) && Number.isFinite(y)
+      && x >= 0.32 && x <= 0.68 && y >= configuredTop - 0.015 && y < 0.09;
+  });
+  if (!headerNumbers.length) return configuredTop;
+  // Only expand the crop to include printed page furniture. Do not discard
+  // the first line of a part on pages where its crop starts below the number.
+  return Math.min(0.12, Math.max(configuredTop, ...headerNumbers.map((row) => Number(row.yNorm) + 0.012)));
+}
+
 function detectedFooterCutoff(pageData, configuredBottom) {
   // Some prelim papers place page furniture well above the nominal footer band.
   // Detect that furniture independently of question/part ownership and crop from
@@ -2338,7 +2355,7 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     // before any question-specific or review-only trimming. Keeping this as a
     // distinct first crop prevents raw page furniture from reappearing in the
     // layout preview on continuation pages.
-    const cleanTop = clamp((Number(headerPct) || 0) / 100 + topExtra, 0, 0.48);
+    const cleanTop = detectedHeaderCutoff(pageData, clamp((Number(headerPct) || 0) / 100 + topExtra, 0, 0.48));
     const configuredBottom = clamp(1 - (Number(footerPct) || 0) / 100 - bottomExtra, 0.52, 1);
     const cleanBottom = detectedFooterCutoff(pageData, configuredBottom);
     if (cleanBottom <= cleanTop) continue;
@@ -2818,6 +2835,13 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
     const part = [...strip.partFractions].reverse().find((item) => item.fraction < fraction);
     return { fraction, label: part?.label || region.label };
   }).filter(Boolean);
+  // Saving or importing an exclusion past the last worked line is allowed,
+  // but the preview should make it obvious that the omitted answer cannot be
+  // recovered by repagination.
+  const endExclusion = compacted.exclusions.find((range) => range.end > 0.95 && range.start < 0.90);
+  const exclusionEndWarning = endExclusion
+    ? `The final exclusion removes ${(100 * (endExclusion.end - endExclusion.start)).toFixed(1)}% of this question strip, including material near the end. Pagination cannot show anything inside that exclusion. Drag its lower edge to restore any missing workings.`
+    : '';
   const finalPages = makeFinalPages(compacted.canvas, compactedBreaks);
   const sourcePages = [];
   for (let page = region.start.page; page <= region.end.page; page += 1) sourcePages.push(page);
@@ -2938,6 +2962,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
 
       {manualBreakInsidePart.length > 0 && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Saved page break inside a question part:</strong> {manualBreakInsidePart.map((item) => `${item.label} (${(item.fraction * 100).toFixed(1)}%)`).join(', ')}. This intentionally divides the part across output pages. Drag the purple line to the beginning of the part to keep it together, or use Reset smart breaks.</div>}
       {savedExclusions.some((range) => strip.partFractions.some((part) => part.fraction > range.start && part.fraction < range.end)) && <div role="status" className="exclusion-boundary-warning"><strong>Check excluded question parts:</strong> One or more grey bands cross a blue part boundary. This may be intentional when removing repeated questions from solutions. Review the right-hand preview; drag the top/bottom edge of a grey band to keep more working without restoring the entire band.</div>}
+      {exclusionEndWarning && <div role="alert" className="exclusion-boundary-warning"><strong>Missing content warning:</strong> {exclusionEndWarning}</div>}
       {breakWarning && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Page fit warning:</strong> {breakWarning}</div>}
 
       {showExcludeHelp && <div style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #cfd8e6', borderRadius: 10, background: '#fff', color: '#43516a', fontSize: '.82rem', lineHeight: 1.45 }}>
