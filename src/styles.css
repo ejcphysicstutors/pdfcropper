@@ -580,3 +580,16 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
   .shortcut-grid > :nth-last-child(-n + 2) { border-bottom: 1px solid #edf1f5; }
   .shortcut-grid > :last-child { border-bottom: 0; }
 }
+
+/* Sticky layout controls need the WINDOW as scroll container, not an inner
+   .document-area overflow box. Otherwise sticky stops working while reading
+   a long multi-page question. */
+.document-area { overflow: visible; }
+@media (max-width: 900px) {
+  .topbar { position: sticky; top: 0; z-index: 60; }
+  .document-area { overflow: visible; }
+}
+.layout-sticky-controls { top: 64px; z-index: 35; }
+@media (max-width: 900px) {
+  .layout-sticky-controls { top: 64px; }
+}

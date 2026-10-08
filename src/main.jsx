@@ -777,8 +777,8 @@ function App() {
       if (!startLine) continue;
       const regionId = startLine.id;
       outputBreaks[regionId] = Array.isArray(question.outputPageBreakFractions) ? question.outputPageBreakFractions : [];
-      exclusions[regionId] = Array.isArray(question.excludedOutputRanges)
-        ? question.excludedOutputRanges.map((range) => ({
+      exclusions[regionId] = Array.isArray(question.excludedOutputRanges || question.outputCrop?.excludedRanges)
+        ? (question.excludedOutputRanges || question.outputCrop.excludedRanges).map((range) => ({
             id: range.id || makeId('exclude'),
             start: Number.isFinite(Number(range.start)) ? Number(range.start) : Number(range.startFraction),
             end: Number.isFinite(Number(range.end)) ? Number(range.end) : Number(range.endFraction),
@@ -948,7 +948,7 @@ function App() {
           const snapshot = snapshotFromSegmentationPayload(payload, 'solutions');
           setStatus('Solution JSON recognised. Reopening its saved boundaries for adjustment…');
           await openPdf(pdfFiles[0], 'solutions', snapshot);
-          setStatus('Solution boundaries loaded from the JSON. Adjust them as needed, approve again, then save a revised solution JSON.');
+          setStatus('Solution boundaries and excluded crop regions restored from JSON. Check Layout > Output preview, approve again, then save the revised solution JSON.');
           return;
         }
 
@@ -958,7 +958,7 @@ function App() {
           setSolutionPayload(null);
           setStatus('Question JSON matches this question paper. Reopening its saved boundaries for adjustment…');
           await openPdf(pdfFiles[0], 'questions', snapshot);
-          setStatus('Question boundaries loaded from the JSON. Adjust them as needed, approve again, then save a revised question JSON.');
+          setStatus('Question boundaries and excluded crop regions restored from JSON. Check Layout > Output preview, approve again, then save the revised question JSON.');
           return;
         }
 
@@ -1503,6 +1503,13 @@ function App() {
       footerFraction: round4(footerPct / 100),
       pageCount: pages.length,
       expectedQuestionLabels: isSolution ? (questionPayload?.questions || []).map((question) => question.label) : undefined,
+      cropInstructions: {
+        appliesTo: isSolution ? 'solutions' : 'questions',
+        requiredForQuestionBank: true,
+        coordinateSystem: 'fractions of the full cleaned question strip, before exclusions and output page breaks',
+        order: ['crop source question using start/end', 'remove source-page header/footer and review trim', 'remove every excludedOutputRanges band', 'paginate using outputPageBreakFractions'],
+        exclusionPolicy: 'Excluded ranges are not part of the published question or solution and MUST NOT appear in question-bank crops, previews, exports or searchable extracted content.',
+      },
       questions: regions.map((region, index) => ({
         questionRef: isSolution ? (questionPayload?.questions?.[index]?.label || region.label) : undefined,
         label: isSolution ? (questionPayload?.questions?.[index]?.label || region.label) : region.label,
@@ -1521,7 +1528,15 @@ function App() {
           end: { page: segment.end.page, yFractionFromTop: round4(segment.end.y) },
         })),
         outputPageBreakFractions: (outputBreaks[region.id] || []).map(round4),
-        excludedOutputRanges: (exclusions[region.id] || []).map((range) => ({ startFraction: round4(range.start), endFraction: round4(range.end) })),
+        excludedOutputRanges: normalizeExclusions(exclusions[region.id] || []).map((range) => ({ startFraction: round4(range.start), endFraction: round4(range.end) })),
+        outputCrop: {
+          version: 1,
+          exclusionCoordinateSystem: 'normalized vertical fraction of cleaned question strip before removal',
+          excludedRanges: normalizeExclusions(exclusions[region.id] || []).map((range) => ({ startFraction: round4(range.start), endFraction: round4(range.end) })),
+          exclusionBehavior: 'remove-content',
+          includeExcludedContentInQuestionBank: false,
+          outputPageBreakFractions: (outputBreaks[region.id] || []).map(round4),
+        },
         pageTrimOverrides: Object.entries(trimOverrides[region.id] || {}).map(([page, trim]) => ({ page: Number(page), extraTopFraction: round4(trim.topExtra || 0), extraBottomFraction: round4(trim.bottomExtra || 0) })),
       })),
       segmentationApproval: {
@@ -1544,8 +1559,8 @@ function App() {
         exactParentMatch: Boolean(questionPayload?.questions?.length && questionPayload.questions.length === regions.length),
       } : undefined,
       notes: isSolution
-        ? 'Solution boundaries are matched in order to the approved question-paper question list. Parent question identity comes from the question JSON, not from solution-page numbering alone.'
-        : 'Question starts/ends define source ownership. Review-only global/local trim overrides, excluded output ranges and publication page breaks alter layout only; they do not change source question ownership.',
+        ? 'Solution boundaries are matched in order to the approved question-paper question list. Excluded output ranges MUST be removed from published solution crops and question-bank exports.'
+        : 'Question starts/ends define source ownership. Excluded output ranges MUST be removed from published question crops and question-bank exports; they do not change source question ownership.',
     };
   }
 
@@ -2865,12 +2880,12 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       {breakWarning && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Page fit warning:</strong> {breakWarning}</div>}
 
       {showExcludeHelp && <div style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #cfd8e6', borderRadius: 10, background: '#fff', color: '#43516a', fontSize: '.82rem', lineHeight: 1.45 }}>
-        <strong style={{ color: '#24324a' }}>Remove blank space:</strong> click <strong>Remove blank space</strong> (or press <kbd>X</kbd>), then drag vertically across the unwanted band in <strong>Edit crop</strong>. Double-click a grey <strong>EXCLUDED</strong> band to restore it.
+        <strong style={{ color: '#24324a' }}>Remove content or blank space:</strong> click <strong>Remove blank space</strong> (or press <kbd>X</kbd>), then drag vertically across the unwanted band in <strong>Edit crop</strong>. The grey <strong>EXCLUDED</strong> regions are permanently omitted from the output preview and are recorded in the saved question/solution JSON. Double-click a band to restore it.
       </div>}
 
       <div className="preview-grid">
         <div className="layout-editor-panel">
-          <div className="panel-heading compact-panel-heading"><div><h3>Edit crop</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : addBreakMode ? 'Click where the new page should end; it will snap to a nearby part boundary.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} removed</span></div>
+          <div className="panel-heading compact-panel-heading"><div><h3>Edit crop</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : addBreakMode ? 'Click where the new page should end; it will snap to a nearby part boundary.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} excluded from output</span></div>
           <StripBreakEditor strip={strip} breaks={effectiveOriginalBreaks} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} addBreakMode={addBreakMode} onAddBreakComplete={() => setAddBreakMode(false)} selectedBreakIndex={selectedBreakIndex} onSelectBreak={setSelectedBreakIndex} onBreakWarning={setBreakWarning} />
         </div>
         <div className="final-pages-panel">
