@@ -2647,6 +2647,22 @@ function buildCompactedStrip(strip, exclusions) {
   return { canvas: out, exclusions: normalized, originalToCompacted, compactedToOriginal, joinGapPx };
 }
 
+// A question-part boundary may be swallowed by a teacher-selected removal,
+// especially when the repeated question heading is being removed from solutions.
+// Do not discard that boundary: it is still needed to keep the remaining worked
+// solution together when an output page fills up.
+function mapPartsToCompactedStrip(partFractions, compacted) {
+  return (partFractions || []).map((part) => {
+    const range = compacted.exclusions.find((entry) =>
+      part.fraction > entry.start && part.fraction < entry.end
+    );
+    // Anchor at the end of the removed content, where the retained solution
+    // resumes. This avoids a page break stranded in an excluded band.
+    const sourceFraction = range ? range.end : part.fraction;
+    return { ...part, fraction: compacted.originalToCompacted(sourceFraction) };
+  }).filter((part) => part.fraction > 0.0005 && part.fraction < 0.9995);
+}
+
 function moveBreakToAdjacentPart(strip, breaks, exclusions, selectedIndex, direction) {
   if (!strip || selectedIndex == null || selectedIndex < 0 || selectedIndex >= (breaks || []).length) {
     return { moved: false, breaks: breaks || [], warning: '' };
@@ -2737,9 +2753,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       setStrip(result);
       if (!result) { setLoading(false); return; }
       const compacted = buildCompactedStrip(result.canvas, savedExclusions);
-      const compactedParts = result.partFractions
-        .filter((part) => !compacted.exclusions.some((range) => part.fraction > range.start && part.fraction < range.end))
-        .map((part) => ({ ...part, fraction: compacted.originalToCompacted(part.fraction) }));
+      const compactedParts = mapPartsToCompactedStrip(result.partFractions, compacted);
       const compactedAuto = automaticBreaks(compacted.canvas.width, compacted.canvas.height, compactedParts);
       const nextAuto = compactedAuto.map(compacted.compactedToOriginal);
       setAutoBreaks(nextAuto);
@@ -2753,9 +2767,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   if (loading || !strip) return <div className="loading-card">Building cleaned question preview…</div>;
 
   const compacted = buildCompactedStrip(strip.canvas, savedExclusions);
-  const compactedParts = strip.partFractions
-    .filter((part) => !compacted.exclusions.some((range) => part.fraction > range.start && part.fraction < range.end))
-    .map((part) => ({ ...part, fraction: compacted.originalToCompacted(part.fraction) }));
+  const compactedParts = mapPartsToCompactedStrip(strip.partFractions, compacted);
   // Saved break coordinates refer to the original strip. A break swallowed by
   // an excluded band is no longer a meaningful page boundary: omit it, while
   // preserving the other teacher-selected breaks in compacted coordinates.
@@ -2821,9 +2833,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
     // strip without rebuilding the source strip. Rebuilding here used to replace
     // the whole review workspace with a loading card, which jumped the teacher
     // back to the top of the page after every exclusion.
-    const compactedParts = strip.partFractions
-      .filter((part) => !newCompacted.exclusions.some((range) => part.fraction > range.start && part.fraction < range.end))
-      .map((part) => ({ ...part, fraction: newCompacted.originalToCompacted(part.fraction) }));
+    const compactedParts = mapPartsToCompactedStrip(strip.partFractions, newCompacted);
     const nextAuto = automaticBreaks(newCompacted.canvas.width, newCompacted.canvas.height, compactedParts)
       .map(newCompacted.compactedToOriginal);
     setAutoBreaks(nextAuto);
