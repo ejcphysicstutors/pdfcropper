@@ -1518,9 +1518,17 @@ function App() {
           isPart,
         };
       });
-      return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end) || linked, cropStyleResolved: resolvedStyle, linked, label: fallbackLabel, parts, segments };
+      // Navigation-only markers remain available even when the teacher chooses
+      // whole-question cropping. They do not become saved question subparts.
+      const navigationParts = [
+        ...lines.filter((line) => line.kind === PART && comparePos(line, start) > 0 && comparePos(line, finalEnd) < 0)
+          .map((line) => ({ page: line.page, y: line.y, label: 'Detected part' })),
+        ...detectedPartStarts.filter((part) => comparePos(part, start) > 0 && comparePos(part, finalEnd) < 0)
+          .map((part) => ({ page: part.page, y: part.y, label: part.raw || 'Detected part' })),
+      ];
+      return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end) || linked, cropStyleResolved: resolvedStyle, linked, label: fallbackLabel, parts, segments, navigationParts };
     });
-  }, [activeLines, footerPct, pages, segmentLabelOverrides, segmentPartFlags, workflowKind, questionPayload, cropStyle, cropStyleOverrides]);
+  }, [activeLines, lines, footerPct, pages, segmentLabelOverrides, segmentPartFlags, workflowKind, questionPayload, cropStyle, cropStyleOverrides]);
 
   useEffect(() => {
     if (!regions.length) { setSelectedQuestionId(null); return; }
@@ -2478,7 +2486,15 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     return { id: part.id, label: segment?.label || 'Part', fraction: round4((map.startY + local * map.height) / strip.height) };
   }).filter(Boolean);
 
-  return { dataUrl: strip.toDataURL('image/jpeg', 0.94), canvas: strip, width: strip.width, height: strip.height, partFractions };
+  const navigationFractions = (region.navigationParts || []).map((part) => {
+    const map = pageMaps.find((candidate) => candidate.page === part.page);
+    if (!map || part.y < map.top || part.y >= map.bottom) return null;
+    const local = clamp((part.y - map.top) / Math.max(0.0001, map.bottom - map.top), 0, 1);
+    return { label: part.label, fraction: round4((map.startY + local * map.height) / strip.height) };
+  }).filter(Boolean);
+  // Page joins are useful intermediate snap targets for long questions.
+  for (const map of pageMaps.slice(1)) navigationFractions.push({ label: `Page ${map.page} start`, fraction: round4(map.startY / strip.height) });
+  return { dataUrl: strip.toDataURL('image/jpeg', 0.94), canvas: strip, width: strip.width, height: strip.height, partFractions, navigationFractions };
 }
 
 function automaticBreaks(stripWidth, stripHeight, partFractions) {
@@ -2786,44 +2802,46 @@ function moveBreakToAdjacentPart(strip, breaks, exclusions, selectedIndex, direc
   const previous = selectedIndex > 0 ? currentBreaks[selectedIndex - 1] : 0;
   const next = selectedIndex < currentBreaks.length - 1 ? currentBreaks[selectedIndex + 1] : 1;
 
-  // Work from the compacted strip so a removed band near the end of a part
-  // does not make the fit calculation think the page is taller than it really
-  // is. Part starts that fall inside an excluded band are not useful snap
-  // targets and are ignored.
-  const candidates = (strip.partFractions || [])
-    .map((part) => part.fraction)
-    .filter((fraction) => !normalizedExclusions.some((range) => fraction > range.start && fraction < range.end))
-    .filter((fraction) => direction < 0
-      ? fraction > previous + 0.002 && fraction < current - 0.002
-      : fraction > current + 0.002 && fraction < next - 0.002)
-    .sort((a, b) => a - b);
+  // Include navigation-only detected markers even in whole-question mode.
+  // Markers swallowed by exclusions snap to the end of that removed band.
+  const targets = [...(strip.partFractions || []), ...(strip.navigationFractions || [])]
+    .map((part) => {
+      const range = normalizedExclusions.find((entry) => part.fraction > entry.start && part.fraction < entry.end);
+      return { ...part, fraction: range ? range.end : part.fraction };
+    });
+  const candidates = targets
+    .filter((part) => direction < 0
+      ? part.fraction > previous + 0.002 && part.fraction < current - 0.002
+      : part.fraction > current + 0.002 && part.fraction < next - 0.002)
+    .sort((a, b) => a.fraction - b.fraction)
+    .filter((part, index, array) => index === 0 || Math.abs(part.fraction - array[index - 1].fraction) > 0.004);
 
-  const candidate = direction < 0 ? candidates[candidates.length - 1] : candidates[0];
+  const candidatePart = direction < 0 ? candidates[candidates.length - 1] : candidates[0];
+  const candidate = candidatePart?.fraction;
   if (candidate == null) {
     return {
       moved: false,
       breaks: currentBreaks,
-      warning: direction < 0 ? 'There is no earlier question-part boundary for this page break.' : 'There is no later question-part boundary before the next page break.',
+      warning: direction < 0 ? 'No earlier detected part or source-page boundary. You can still drag the purple line manually.' : 'No later detected part or source-page boundary. You can still drag the purple line manually.',
     };
   }
 
+  // The arrow keys are positioning tools. Do not block the teacher from
+  // choosing a later boundary just because that would exceed one A4 page:
+  // the output planner can insert an additional automatic capacity break.
+  let warning = '';
   if (direction > 0) {
     const pageHeight = PAGE_CONTENT_HEIGHT * (compacted.canvas.width / PAGE_CONTENT_WIDTH);
     const previousCompacted = compacted.originalToCompacted(previous) * compacted.canvas.height;
     const candidateCompacted = compacted.originalToCompacted(candidate) * compacted.canvas.height;
     if (candidateCompacted - previousCompacted > pageHeight + 1) {
-      const part = (strip.partFractions || []).find((item) => Math.abs(item.fraction - candidate) < 0.0002);
-      return {
-        moved: false,
-        breaks: currentBreaks,
-        warning: `${part?.label || 'The next part'} will not fit completely on this A4 page. The break has not moved. If you want to split that part, drag the purple line manually to a suitable point inside the part.`,
-      };
+      warning = 'Break moved. The output may add an A4 capacity break before this boundary.';
     }
   }
 
   const nextBreaks = [...currentBreaks];
   nextBreaks[selectedIndex] = round4(candidate);
-  return { moved: true, breaks: nextBreaks.sort((a, b) => a - b), warning: '' };
+  return { moved: true, breaks: nextBreaks.sort((a, b) => a - b), warning };
 }
 
 function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, hasNext, onPrevious, onNext, currentIndex, totalCount, savedBreaks, onBreaksChange, savedExclusions, onExclusionsChange, globalReviewTrim, onGlobalReviewTrimChange, trimOverrides, onTrimOverridesChange }) {
@@ -2982,14 +3000,14 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
             <div><p className="eyebrow">Layout · {currentIndex + 1} of {totalCount}</p><h2>{region.label}</h2></div>
             <button type="button" className="ghost compact" onClick={onNext} disabled={!hasNext} aria-label="Next question" title="Next question" style={{ minWidth: 38, fontSize: '1.2rem', lineHeight: 1 }}>→</button>
           </div>
-          <p>Use ← / → to review questions. Click a purple break, then use ↑ / ↓ to jump to the previous/next part boundary; drag it manually to split a part.</p>
+          <p>Use ← / → to review questions. Click a purple break, then use ↑ / ↓ to jump between detected parts or source-page boundaries (even in whole-question mode); drag for fine positioning.</p>
         </div>
         <div className="preview-actions">
           <button className={`ghost compact ${excludeMode ? 'active-tool' : ''}`} onClick={() => { setExcludeMode((value) => !value); setAddBreakMode(false); }}>Remove blank space <kbd>X</kbd></button>
           <button className="ghost compact" onClick={() => setShowExcludeHelp((value) => !value)} aria-expanded={showExcludeHelp}>{showExcludeHelp ? 'Hide removal help' : 'How to remove space'}</button>
           <button className={`ghost compact ${addBreakMode ? 'active-tool' : ''}`} onClick={() => { setAddBreakMode((value) => !value); setExcludeMode(false); }}>{addBreakMode ? 'Click crop to place break' : '+ Add page break'}</button>
-          {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(-1)} title="Move selected page break to the previous part boundary">↑ Previous part</button>}
-          {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(1)} title="Move selected page break to the next part boundary">↓ Next part</button>}
+          {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(-1)} title="Move selected page break to the previous part boundary">↑ Previous boundary</button>}
+          {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(1)} title="Move selected page break to the next part boundary">↓ Next boundary</button>}
           {selectedBreakIndex != null && selectedBreakIndex < effectiveOriginalBreaks.length && <button className="ghost compact" type="button" onClick={removeSelectedBreak} title="Delete the selected purple page break">Remove selected break</button>}
           <button className="ghost compact" onClick={() => { onBreaksChange(autoBreaks); setAddBreakMode(false); setSelectedBreakIndex(null); setBreakWarning(''); }}>Reset smart breaks</button>
         </div>
