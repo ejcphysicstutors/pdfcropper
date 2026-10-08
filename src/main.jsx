@@ -2300,38 +2300,24 @@ function detectedHeaderCutoff(pageData, configuredTop) {
 }
 
 function detectedFooterCutoff(pageData, configuredBottom) {
-  // Some prelim papers place page furniture well above the nominal footer band.
-  // Detect that furniture independently of question/part ownership and crop from
-  // the first footer row downward. This is intentionally conservative: paper codes
-  // and "Turn Over" can begin around 75-80% of the source page, while a bare page
-  // number is only treated as furniture when it is both low on the page and centred.
+  // Do not infer a footer from a bare number in the lower portion of a page.
+  // In worked Physics solutions, equations routinely contain small standalone
+  // numbers, and an incorrect match silently removes the FINAL answer lines.
+  // Printed page numbers are handled by detectedHeaderCutoff instead.
+  // Only recognise explicit footer furniture in the physical footer zone.
   const footerRows = (pageData.rows || []).filter((row) => {
     const y = Number(row.yNorm);
-    if (!Number.isFinite(y) || y >= configuredBottom) return false;
+    if (!Number.isFinite(y) || y < 0.90 || y >= configuredBottom) return false;
     const text = String(row.text || '').replace(/\s+/g, ' ').trim();
-    if (!text) return false;
-
-    const explicitFooterText = y >= 0.65 && (
-      /turn\s+over/i.test(text)
+    return /turn\s+over/i.test(text)
       || /\b\d{4}\s*\/\s*0?\d{1,2}\s*\//i.test(text)
-      || /\b(?:ASRJC|HCI|RI|RJC|VJC|NJC|SAJC|EJC|ACJC|CJC|DHS|TJC|NYJC|YIJC|JPJC)\b/i.test(text) && /\d{4}/.test(text)
-      || /^(?:©|copyright)\b/i.test(text)
-    );
-
-    // Page numbers on many JC papers sit surprisingly high above the physical
-    // bottom edge (sometimes around 70% of the source page). Treat a bare,
-    // horizontally centred integer in the lower third as page furniture so it
-    // cannot leak back into the worksheet preview after the nominal footer crop.
-    const centredPageNumber = y >= 0.68
-      && /^\d{1,3}$/.test(text)
-      && Number(row.xNorm) >= 0.32
-      && Number(row.xNorm) <= 0.68;
-
-    return explicitFooterText || centredPageNumber;
+      || (/\b(?:ASRJC|HCI|RI|RJC|VJC|NJC|SAJC|EJC|ACJC|CJC|DHS|TJC|NYJC|YIJC|JPJC)\b/i.test(text) && /\d{4}/.test(text))
+      || /^(?:©|copyright)\b/i.test(text);
   });
   if (!footerRows.length) return configuredBottom;
   const firstFurnitureY = Math.min(...footerRows.map((row) => Number(row.yNorm)));
-  return Math.min(configuredBottom, clamp(firstFurnitureY - 0.008, 0.52, 1));
+  // Do not pull a page's footer crop into substantive answer content.
+  return Math.min(configuredBottom, Math.max(0.90, firstFurnitureY - 0.006));
 }
 
 async function buildQuestionStrip(pages, region, headerPct, footerPct, globalReviewTrim = {}, trimOverrides = {}) {
@@ -2835,13 +2821,6 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
     const part = [...strip.partFractions].reverse().find((item) => item.fraction < fraction);
     return { fraction, label: part?.label || region.label };
   }).filter(Boolean);
-  // Saving or importing an exclusion past the last worked line is allowed,
-  // but the preview should make it obvious that the omitted answer cannot be
-  // recovered by repagination.
-  const endExclusion = compacted.exclusions.find((range) => range.end > 0.95 && range.start < 0.90);
-  const exclusionEndWarning = endExclusion
-    ? `The final exclusion removes ${(100 * (endExclusion.end - endExclusion.start)).toFixed(1)}% of this question strip, including material near the end. Pagination cannot show anything inside that exclusion. Drag its lower edge to restore any missing workings.`
-    : '';
   const finalPages = makeFinalPages(compacted.canvas, compactedBreaks);
   const sourcePages = [];
   for (let page = region.start.page; page <= region.end.page; page += 1) sourcePages.push(page);
@@ -2962,7 +2941,6 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
 
       {manualBreakInsidePart.length > 0 && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Saved page break inside a question part:</strong> {manualBreakInsidePart.map((item) => `${item.label} (${(item.fraction * 100).toFixed(1)}%)`).join(', ')}. This intentionally divides the part across output pages. Drag the purple line to the beginning of the part to keep it together, or use Reset smart breaks.</div>}
       {savedExclusions.some((range) => strip.partFractions.some((part) => part.fraction > range.start && part.fraction < range.end)) && <div role="status" className="exclusion-boundary-warning"><strong>Check excluded question parts:</strong> One or more grey bands cross a blue part boundary. This may be intentional when removing repeated questions from solutions. Review the right-hand preview; drag the top/bottom edge of a grey band to keep more working without restoring the entire band.</div>}
-      {exclusionEndWarning && <div role="alert" className="exclusion-boundary-warning"><strong>Missing content warning:</strong> {exclusionEndWarning}</div>}
       {breakWarning && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Page fit warning:</strong> {breakWarning}</div>}
 
       {showExcludeHelp && <div style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #cfd8e6', borderRadius: 10, background: '#fff', color: '#43516a', fontSize: '.82rem', lineHeight: 1.45 }}>
