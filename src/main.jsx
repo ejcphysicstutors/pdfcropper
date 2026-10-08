@@ -2518,19 +2518,31 @@ function normalizeBreaksForPageCapacity(stripWidth, stripHeight, partFractions, 
 }
 
 function makeFinalPages(strip, breaks) {
-  const boundaries = [0, ...breaks.map((value) => clamp(value, 0.001, 0.999)), 1].sort((a, b) => a - b);
+  // The break planner works with fractions, but rasterization uses integer
+  // pixels. Recheck capacity with those exact pixel coordinates so rounding,
+  // user-authored breaks and imported JSON can never silently clip a solution.
+  const pageHeight = Math.floor(PAGE_CONTENT_HEIGHT * (strip.width / PAGE_CONTENT_WIDTH));
+  const requested = [...new Set((breaks || [])
+    .map((fraction) => Math.round(clamp(Number(fraction) || 0, 0, 1) * strip.height))
+    .filter((y) => y > 0 && y < strip.height))].sort((a, b) => a - b);
+  const boundaries = [0];
+  for (const end of [...requested, strip.height]) {
+    let cursor = boundaries[boundaries.length - 1];
+    while (end - cursor > pageHeight) {
+      cursor = Math.min(end, cursor + pageHeight);
+      boundaries.push(cursor);
+    }
+    if (end > boundaries[boundaries.length - 1]) boundaries.push(end);
+  }
   const pages = [];
   for (let i = 0; i < boundaries.length - 1; i += 1) {
-    const startY = Math.round(boundaries[i] * strip.height);
-    const endY = Math.round(boundaries[i + 1] * strip.height);
-    const sourceHeight = Math.max(1, endY - startY);
+    const startY = boundaries[i];
+    const sourceHeight = boundaries[i + 1] - startY;
+    if (sourceHeight <= 0) continue;
     const a4 = document.createElement('canvas');
     a4.width = 794; a4.height = 1123;
     const ctx = a4.getContext('2d');
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, a4.width, a4.height);
-    // Keep a single, width-based scale for every worksheet page.
-    // Removing blank space must compact the content vertically; it must not
-    // make the remaining question smaller just to fit the page height.
     const scale = PAGE_CONTENT_WIDTH / strip.width;
     const drawWidth = strip.width * scale;
     const drawHeight = sourceHeight * scale;
@@ -2540,7 +2552,6 @@ function makeFinalPages(strip, breaks) {
   }
   return pages;
 }
-
 
 function normalizeExclusions(ranges) {
   const sorted = (ranges || []).map((range) => {
@@ -2745,9 +2756,12 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   const compactedParts = strip.partFractions
     .filter((part) => !compacted.exclusions.some((range) => part.fraction > range.start && part.fraction < range.end))
     .map((part) => ({ ...part, fraction: compacted.originalToCompacted(part.fraction) }));
+  // Saved break coordinates refer to the original strip. A break swallowed by
+  // an excluded band is no longer a meaningful page boundary: omit it, while
+  // preserving the other teacher-selected breaks in compacted coordinates.
   const requestedCompactedBreaks = (savedBreaks || [])
-    .filter((fraction) => !compacted.exclusions.some((range) => fraction > range.start && fraction < range.end))
-    .map(compacted.originalToCompacted);
+    .filter((fraction) => !compacted.exclusions.some((range) => fraction >= range.start && fraction <= range.end))
+    .map((fraction) => compacted.originalToCompacted(fraction));
   const compactedBreaks = normalizeBreaksForPageCapacity(
     compacted.canvas.width,
     compacted.canvas.height,
@@ -2798,16 +2812,10 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       return;
     }
 
-    // Keep each worksheet page ending at the same physical A4 position when
-    // blank space is removed/restored. Breaks are stored in original-strip
-    // coordinates, so remap them through the old and new compacted strips.
-    const oldCompacted = buildCompactedStrip(strip.canvas, savedExclusions);
+    // Page breaks are stored in source-strip coordinates. Excluding a question
+    // statement must not move a teacher's break into a different question part.
+    // The preview remaps those original coordinates only after compaction.
     const newCompacted = buildCompactedStrip(strip.canvas, nextExclusions);
-    const shiftedBreaks = (savedBreaks || []).map((fraction) => {
-      const oldDestY = oldCompacted.originalToCompacted(fraction) * oldCompacted.canvas.height;
-      const newCompactedFraction = clamp(oldDestY / Math.max(1, newCompacted.canvas.height), 0, 1);
-      return round4(newCompacted.compactedToOriginal(newCompactedFraction));
-    }).sort((a, b) => a - b);
 
     // Recalculate the automatic-break suggestion against the newly compacted
     // strip without rebuilding the source strip. Rebuilding here used to replace
@@ -2823,7 +2831,6 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
     const scrollTop = document.scrollingElement?.scrollTop ?? window.scrollY;
     const scrollLeft = document.scrollingElement?.scrollLeft ?? window.scrollX;
     onExclusionsChange(nextExclusions);
-    if (shiftedBreaks.length) onBreaksChange(shiftedBreaks);
     requestAnimationFrame(() => requestAnimationFrame(() => {
       window.scrollTo({ top: scrollTop, left: scrollLeft, behavior: 'auto' });
     }));
