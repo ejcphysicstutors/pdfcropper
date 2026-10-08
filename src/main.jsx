@@ -13,7 +13,7 @@ const END = 'question-end';
 const PART = 'part';
 const PAGE_CONTENT_WIDTH = 706;
 const PAGE_CONTENT_HEIGHT = 1035;
-const APP_VERSION = '0.9.2-trial';
+const APP_VERSION = '0.9.3-whole-question';
 
 const LOCAL_DRAFT_DB = 'prelim-cropper-local-v1';
 const LOCAL_DRAFT_STORE = 'drafts';
@@ -322,6 +322,8 @@ function App() {
   const [segmentPartFlags, setSegmentPartFlags] = useState({});
   const [lastSuggestionIds, setLastSuggestionIds] = useState([]);
   const [viewMode, setViewMode] = useState('segment');
+  // Whole-question crops are the default; subpart boundaries remain available on demand.
+  const [detailedQuestionIds, setDetailedQuestionIds] = useState([]);
   const [outputBreaks, setOutputBreaks] = useState({});
   const [exclusions, setExclusions] = useState({});
   const [trimOverrides, setTrimOverrides] = useState({});
@@ -1033,6 +1035,7 @@ function App() {
   }
 
   function addLine(page, y, kind = lineMode) {
+    if (kind === PART && !detailedQuestionIds.includes(selectedQuestionId)) return;
     const newLine = { id: makeId(kind), page, y: safeY(y), kind, label: '', manualLabel: false, source: 'manual' };
     setLines((current) => [...current, newLine].sort(comparePos));
     setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]);
@@ -1285,8 +1288,20 @@ function App() {
     });
   }
 
+  // Keep detected PART lines in memory, but do not use them in whole-question mode.
+  // This preserves existing edits while avoiding compulsory part-by-part review.
+  const activeLines = useMemo(() => {
+    const starts = lines.filter((line) => line.kind === START).sort(comparePos);
+    return lines.filter((line) => {
+      if (line.kind !== PART) return true;
+      const owner = starts.find((start, index) =>
+        comparePos(line, start) > 0 && (!starts[index + 1] || comparePos(line, starts[index + 1]) < 0));
+      return Boolean(owner && detailedQuestionIds.includes(owner.id));
+    });
+  }, [lines, detailedQuestionIds]);
+
   const regions = useMemo(() => {
-    const ordered = [...lines].sort(comparePos);
+    const ordered = [...activeLines].sort(comparePos);
     const starts = ordered.filter((line) => line.kind === START);
 
     function rowsInside(start, end) {
@@ -1474,7 +1489,7 @@ function App() {
       });
       return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end), label: fallbackLabel, parts, segments };
     });
-  }, [lines, footerPct, pages, segmentLabelOverrides, segmentPartFlags, workflowKind, questionPayload]);
+  }, [activeLines, footerPct, pages, segmentLabelOverrides, segmentPartFlags, workflowKind, questionPayload]);
 
   useEffect(() => {
     if (!regions.length) { setSelectedQuestionId(null); return; }
@@ -1544,7 +1559,7 @@ function App() {
         approvedAt: approvalOverride?.approvedAt ?? segmentationApprovedAt,
         structuralIssueCount: validateSegmentation().length,
       },
-      lines: [...lines].sort(comparePos).map((line) => ({
+      lines: [...activeLines].sort(comparePos).map((line) => ({
         page: line.page,
         yFractionFromTop: round4(line.y),
         type: line.kind,
@@ -1715,7 +1730,7 @@ function App() {
 
   const selectedRegion = regions.find((region) => region.id === selectedQuestionId) || null;
   const selectedRegionIndex = regions.findIndex((region) => region.id === selectedQuestionId);
-  const selectedLine = lines.find((line) => line.id === selectedLineId) || null;
+  const selectedLine = activeLines.find((line) => line.id === selectedLineId) || null;
   const selectedLineOwner = selectedLine ? regions.find((region) =>
     region.start.id === selectedLine.id || region.end.id === selectedLine.id || within(selectedLine, region.start, region.end)
   ) : null;
@@ -1746,7 +1761,7 @@ function App() {
 
   function validateSegmentation() {
     const issues = [];
-    const ordered = [...lines].sort(comparePos);
+    const ordered = [...activeLines].sort(comparePos);
     const starts = ordered.filter((line) => line.kind === START);
     const ends = ordered.filter((line) => line.kind === END);
     const parts = ordered.filter((line) => line.kind === PART);
@@ -1805,7 +1820,7 @@ function App() {
       if (workflowKind === 'solutions') {
         const expectedSegments = authoritativeQuestionSegments(questionPayload?.questions?.[regionIndex]);
         const actualSegments = region.segments.filter((segment) => segment.isPart !== false);
-        if (expectedSegments.length && actualSegments.length !== expectedSegments.length) {
+        if (detailedQuestionIds.includes(region.id) && expectedSegments.length && actualSegments.length !== expectedSegments.length) {
           const expectedLabels = expectedSegments.map((segment, segmentIndex) => {
             const label = String(segment.label || '').trim();
             return label || `${region.label} part ${segmentIndex + 1}`;
@@ -1933,8 +1948,8 @@ function App() {
   const counts = useMemo(() => ({
     start: lines.filter((l) => l.kind === START).length,
     end: lines.filter((l) => l.kind === END).length,
-    part: lines.filter((l) => l.kind === PART).length,
-  }), [lines]);
+    part: activeLines.filter((l) => l.kind === PART).length,
+  }), [lines, activeLines]);
   const explicitEndCount = regions.filter((region) => region.endExplicit).length;
 
   function handleFileDrop(event) {
@@ -1979,7 +1994,7 @@ function App() {
         <div className="topbar-copy">
           <p className="eyebrow">Local browser tool · v{APP_VERSION}</p>
           <h1>{workflowKind === 'solutions' ? 'Prelim Solution Cropper' : 'Prelim Cropper'}</h1>
-          <p className="subtitle">{workflowKind === 'solutions' ? `Match the solution file to the ${questionPayload?.questions?.length || 0} approved question parents, then review the solution crops.` : 'Prepare the paper, check questions and parts, then review worksheet pages.'}</p>
+          <p className="subtitle">{workflowKind === 'solutions' ? `Match the solution file to the ${questionPayload?.questions?.length || 0} approved question parents, then review the solution crops.` : 'Crop full questions first; open subparts only when needed, then review worksheet pages.'}</p>
           {file && <div className="context-strip"><strong>{workflowKind === 'solutions' ? 'Solutions' : 'Question paper'}</strong><span>{file.name}</span>{workflowKind === 'solutions' && questionPayload?.sourceFile && <span className="context-authority">Matched to {questionPayload.sourceFile}</span>}</div>}
         </div>
         {file && <div className="topbar-work-state"><span className="local-save-state">{lastLocalSaveAt ? `Saved locally ${new Date(lastLocalSaveAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Autosave pending'}</span><span className={`json-save-state ${jsonState || ''}`}>{jsonState === 'changed' ? '● Changes since last JSON' : jsonState === 'up-to-date' ? '✓ JSON up to date' : '○ JSON not yet downloaded'}</span></div>}
@@ -2022,14 +2037,14 @@ function App() {
 
               <section className="compact-section">
                 <div className="section-kicker">Automatic first pass</div>
-                <h2>{workflowKind === 'solutions' ? 'Solution blocks' : 'Questions & parts'}</h2>
+                <h2>Whole-question cropping</h2>
                 <button className="detect-card" onClick={suggestRegions} disabled={!pages.length || loading}>
                   <span className="detect-icon">✦</span>
-                  <span><strong>{workflowKind === 'solutions' ? 'Detect solution blocks' : 'Detect questions & parts'}</strong><small>{workflowKind === 'solutions' ? 'Read compact scheme labels (e.g. 1ai, 1aii, 1b) and match them to the question JSON' : 'Find starts, ends and printed subparts automatically'}</small></span>
+                  <span><strong>Detect whole questions</strong><small>Find the start and end of each full question; subparts are optional</small></span>
                 </button>
                 <div className="summary-metrics">
                   <div><strong>{regions.length}</strong><span>questions</span></div>
-                  <div><strong>{counts.part}</strong><span>parts</span></div>
+                  <div><strong>{counts.part}</strong><span>optional part boundaries</span></div>
                   <div className={`review-metric ${liveApprovalIssues.length ? 'has-issues' : 'clear'}`}><strong>{liveApprovalIssues.length}</strong><span>{liveApprovalIssues.length === 1 ? 'issue' : 'issues'}</span></div>
                 </div>
                 <details className="compact-details manual-details">
@@ -2041,7 +2056,7 @@ function App() {
                     <div className="line-mode-picker" role="group" aria-label="Line type">
                       <button className={`line-mode start-mode ${(heldLineMode || lineMode) === START ? 'active' : ''}`} onClick={() => setLineMode(START)}><span className="mode-swatch start-swatch" />Question start <kbd>S</kbd></button>
                       <button className={`line-mode end-mode ${(heldLineMode || lineMode) === END ? 'active' : ''}`} onClick={() => setLineMode(END)}><span className="mode-swatch end-swatch" />Question end <kbd>E</kbd></button>
-                      <button className={`line-mode part-mode ${(heldLineMode || lineMode) === PART ? 'active' : ''}`} onClick={() => setLineMode(PART)}><span className="mode-swatch part-swatch" />Part <kbd>P</kbd></button>
+                      {selectedRegion && detailedQuestionIds.includes(selectedRegion.id) && <button className={`line-mode part-mode ${(heldLineMode || lineMode) === PART ? 'active' : ''}`} onClick={() => setLineMode(PART)}><span className="mode-swatch part-swatch" />Part <kbd>P</kbd></button>}
                     </div>
                     <p className="small">Click a line, then use <strong>↑ / ↓</strong> for fine adjustment. Hold <strong>Shift</strong> for a larger nudge. Drag to move; double-click or press <strong>Delete</strong> / <strong>Backspace</strong> to remove.</p>
                     <div className="button-stack compact-buttons">
@@ -2073,6 +2088,20 @@ function App() {
                   })}
                 </div>
                 {selectedRegion && (
+                  <div className="whole-question-choice">
+                    <strong>{detailedQuestionIds.includes(selectedRegion.id) ? 'Subpart cropping enabled' : 'Full question crop'}</strong>
+                    <p className="small">{detailedQuestionIds.includes(selectedRegion.id) ? 'Blue part boundaries are editable for this question only.' : 'Only the start and end of this question need checking. Header/footer cleanup, exclusions and page review still work as usual.'}</p>
+                    <button type="button" className="ghost full" onClick={() => {
+                      const wasDetailed = detailedQuestionIds.includes(selectedRegion.id);
+                      setDetailedQuestionIds((current) => wasDetailed ? current.filter((id) => id !== selectedRegion.id) : [...current, selectedRegion.id]);
+                      setSelectedSegmentId(null);
+                      setLineMode(START);
+                      setSegmentationApproved(false);
+                      setSegmentationApprovedAt(null);
+                    }}>{detailedQuestionIds.includes(selectedRegion.id) ? 'Use whole question only' : '+ Crop subparts of this question'}</button>
+                  </div>
+                )}
+                {selectedRegion && detailedQuestionIds.includes(selectedRegion.id) && (
                   <div className="label-editor">
                     <label>Question label<input value={selectedRegion.start.label || selectedRegion.label} disabled={workflowKind === 'solutions'} onChange={(e) => updateLineLabel(selectedRegion.start.id, e.target.value)} /></label>
                     <div className="segment-label-list">
@@ -2101,8 +2130,8 @@ function App() {
               </section>
 
               <section className="compact-section review-cta-section">
-                {!!regions.length && !segmentationApproved && <button className="primary full" onClick={approveSegmentation}>{workflowKind === 'solutions' ? '✓ Approve solution matches' : '✓ Approve questions & parts'}</button>}
-                {!!regions.length && segmentationApproved && <button className="approval-confirmed full" type="button" disabled>{workflowKind === 'solutions' ? '✓ Solution matches approved' : '✓ Questions & parts approved'}</button>}
+                {!!regions.length && !segmentationApproved && <button className="primary full" onClick={approveSegmentation}>{workflowKind === 'solutions' ? '✓ Approve solution matches' : '✓ Approve whole questions'}</button>}
+                {!!regions.length && segmentationApproved && <button className="approval-confirmed full" type="button" disabled>{workflowKind === 'solutions' ? '✓ Solution matches approved' : '✓ Whole questions approved'}</button>}
                 {!!regions.length && liveApprovalIssues.length > 0 && (
                   <details className="approval-issues compact-approval-issues">
                     <summary>{liveApprovalIssues.length} issue{liveApprovalIssues.length === 1 ? '' : 's'} to fix before approval</summary>
@@ -2153,7 +2182,7 @@ function App() {
               <div className="rolling-paper">
                 {pages.map((pageData) => (
                   <PdfPage key={pageData.pageNumber} pageData={pageData} headerPct={headerPct} footerPct={footerPct}
-                    lines={lines.filter((line) => line.page === pageData.pageNumber)} lineMode={heldLineMode || lineMode} onAddLine={addLine}
+                    lines={activeLines.filter((line) => line.page === pageData.pageNumber)} lineMode={heldLineMode || lineMode} onAddLine={addLine}
                     onMoveLine={moveLine} onRemoveLine={removeLine} showGuides={showGuides} regions={regions} selectedLineId={selectedLineId} onSelectLine={setSelectedLineId}
                     selectedQuestionId={selectedQuestionId} selectedSegmentId={selectedSegmentId} onSelectSegment={selectSegmentForEditing} />
                 ))}

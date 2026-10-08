@@ -623,3 +623,8 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
 .exclusion-resize-handle.bottom { bottom: -10px; }
 .exclusion-resize-handle:hover, .exclusion-resize-handle:focus-visible { background: #dbeafe; outline: 2px solid #60a5fa; }
 .exclusion-boundary-warning { margin: 0 0 10px; padding: 10px 12px; border: 1px solid #e8b85d; border-radius: 10px; background: #fff8e8; color: #765116; font-size: .82rem; line-height: 1.45; }
+
+/* Optional per-question subpart controls in the streamlined workflow. */
+.whole-question-choice { margin: 12px 0; padding: 12px; border: 1px solid #c7d8f5; background: #f3f7ff; border-radius: 12px; }
+.whole-question-choice strong { display: block; margin-bottom: 5px; }
+.whole-question-choice .small { margin: 3px 0 10px; }
