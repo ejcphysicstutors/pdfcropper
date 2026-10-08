@@ -2443,6 +2443,30 @@ function automaticBreaks(stripWidth, stripHeight, partFractions) {
   return breaks;
 }
 
+// For published pages, do not orphan the beginning of a short question part.
+// Saved coordinates remain unchanged; this only chooses the printed page edge.
+// When a manual break sits inside a part that fits on one A4 page, start that
+// part on the next page instead of displaying just its heading / first lines.
+function keepCompletePartsAtPageBreaks(stripWidth, stripHeight, partFractions, requestedBreaks) {
+  const capacity = PAGE_CONTENT_HEIGHT * (stripWidth / PAGE_CONTENT_WIDTH);
+  const starts = [0, ...(partFractions || []).map((p) => Number(p.fraction) || 0), 1]
+    .filter((f) => f >= 0 && f <= 1).sort((a, b) => a - b);
+  const uniqueStarts = [...new Set(starts.map((f) => Math.round(f * stripHeight)))];
+  const minimumPartFragment = Math.max(10, stripWidth * 0.02);
+  return (requestedBreaks || []).map((fraction) => {
+    const y = clamp(Number(fraction) || 0, 0, 1) * stripHeight;
+    const index = uniqueStarts.findIndex((boundary, i) =>
+      i + 1 < uniqueStarts.length && y > boundary + 1 && y < uniqueStarts[i + 1] - 1);
+    if (index < 0) return fraction;
+    const partStart = uniqueStarts[index];
+    const partEnd = uniqueStarts[index + 1];
+    // A very long part cannot be kept whole. Also avoid creating a tiny page
+    // merely to move a break near the top of the current part.
+    if (partEnd - partStart > capacity + 1 || y - partStart < minimumPartFragment) return fraction;
+    return round4(partStart / stripHeight);
+  });
+}
+
 function normalizeBreaksForPageCapacity(stripWidth, stripHeight, partFractions, requestedBreaks) {
   const pageHeight = PAGE_CONTENT_HEIGHT * (stripWidth / PAGE_CONTENT_WIDTH);
   // A saved/manual page break is intentional even when the whole strip fits on A4.
@@ -2774,11 +2798,17 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   const requestedCompactedBreaks = (savedBreaks || [])
     .filter((fraction) => !compacted.exclusions.some((range) => fraction >= range.start && fraction <= range.end))
     .map((fraction) => compacted.originalToCompacted(fraction));
-  const compactedBreaks = normalizeBreaksForPageCapacity(
+  const publicationBreaks = keepCompletePartsAtPageBreaks(
     compacted.canvas.width,
     compacted.canvas.height,
     compactedParts,
     requestedCompactedBreaks,
+  );
+  const compactedBreaks = normalizeBreaksForPageCapacity(
+    compacted.canvas.width,
+    compacted.canvas.height,
+    compactedParts,
+    publicationBreaks,
   );
   const effectiveOriginalBreaks = compactedBreaks.map(compacted.compactedToOriginal);
   const manualBreakInsidePart = (savedBreaks || []).map((fraction) => {
