@@ -2445,7 +2445,9 @@ function automaticBreaks(stripWidth, stripHeight, partFractions) {
 
 function normalizeBreaksForPageCapacity(stripWidth, stripHeight, partFractions, requestedBreaks) {
   const pageHeight = PAGE_CONTENT_HEIGHT * (stripWidth / PAGE_CONTENT_WIDTH);
-  if (stripHeight <= pageHeight + 1) return [];
+  // A saved/manual page break is intentional even when the whole strip fits on A4.
+  // Discarding it made the editor and exported page preview disagree.
+  if (stripHeight <= pageHeight + 1 && !(requestedBreaks || []).length) return [];
 
   const boundaryYs = [...new Set(
     (partFractions || [])
@@ -2478,9 +2480,12 @@ function normalizeBreaksForPageCapacity(stripWidth, stripHeight, partFractions, 
   let requestIndex = 0;
   let guard = 0;
 
-  while (current + pageHeight < stripHeight - 1 && guard < 300) {
+  while (guard < 300) {
     guard += 1;
     while (requestIndex < requestedYs.length && requestedYs[requestIndex] <= current + 8) requestIndex += 1;
+    // Continue for explicit breaks even if there is room for the entire tail.
+    // Otherwise stop when no further physical page split is needed.
+    if (current + pageHeight >= stripHeight - 1 && requestIndex >= requestedYs.length) break;
 
     const target = Math.min(current + pageHeight, stripHeight - 1);
     const requested = requestIndex < requestedYs.length ? requestedYs[requestIndex] : null;
@@ -2750,6 +2755,13 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
     requestedCompactedBreaks,
   );
   const effectiveOriginalBreaks = compactedBreaks.map(compacted.compactedToOriginal);
+  const manualBreakInsidePart = (savedBreaks || []).map((fraction) => {
+    const starts = [0, ...strip.partFractions.map((part) => part.fraction).sort((a, b) => a - b), 1];
+    const nearest = starts.reduce((best, start) => Math.min(best, Math.abs(start - fraction)), 1);
+    if (nearest <= 0.004) return null;
+    const part = [...strip.partFractions].reverse().find((item) => item.fraction < fraction);
+    return { fraction, label: part?.label || region.label };
+  }).filter(Boolean);
   const finalPages = makeFinalPages(compacted.canvas, compactedBreaks);
   const sourcePages = [];
   for (let page = region.start.page; page <= region.end.page; page += 1) sourcePages.push(page);
@@ -2877,6 +2889,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       </details>
       </div>
 
+      {manualBreakInsidePart.length > 0 && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Saved page break inside a question part:</strong> {manualBreakInsidePart.map((item) => `${item.label} (${(item.fraction * 100).toFixed(1)}%)`).join(', ')}. This intentionally divides the part across output pages. Drag the purple line to the beginning of the part to keep it together, or use Reset smart breaks.</div>}
       {breakWarning && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Page fit warning:</strong> {breakWarning}</div>}
 
       {showExcludeHelp && <div style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #cfd8e6', borderRadius: 10, background: '#fff', color: '#43516a', fontSize: '.82rem', lineHeight: 1.45 }}>
