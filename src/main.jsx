@@ -2913,12 +2913,12 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
         <strong style={{ color: '#24324a' }}>Remove content or blank space:</strong> click <strong>Remove blank space</strong> (or press <kbd>X</kbd>), then drag vertically across the unwanted band in <strong>Edit crop</strong>. The grey <strong>EXCLUDED</strong> regions are permanently omitted from the output preview and are recorded in the saved question/solution JSON. Double-click a band to restore it.
       </div>}
 
-      <div className="preview-grid">
-        <div className="layout-editor-panel">
+      <div className="preview-grid independent-scroll-grid" key={region.id}>
+        <div className="layout-editor-panel" aria-label="Crop editor scroll area" tabIndex={0}>
           <div className="panel-heading compact-panel-heading"><div><h3>Edit crop</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : addBreakMode ? 'Click where the new page should end; it will snap to a nearby part boundary.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} excluded from output</span></div>
           <StripBreakEditor strip={strip} breaks={effectiveOriginalBreaks} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} addBreakMode={addBreakMode} onAddBreakComplete={() => setAddBreakMode(false)} selectedBreakIndex={selectedBreakIndex} onSelectBreak={setSelectedBreakIndex} onBreakWarning={setBreakWarning} />
         </div>
-        <div className="final-pages-panel">
+        <div className="final-pages-panel" aria-label="Output preview scroll area" tabIndex={0}>
           <div className="panel-heading compact-panel-heading"><div><h3>Output preview</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div></div>
           <div className="final-page-list">
             {finalPages.map((src, index) => <div className="preview-page-card" key={`${region.id}-${index}`}><span>Page {index + 1}</span><img src={src} alt={`${region.label} final page ${index + 1}`} /></div>)}

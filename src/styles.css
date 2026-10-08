@@ -581,15 +581,38 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
   .shortcut-grid > :last-child { border-bottom: 0; }
 }
 
-/* Sticky layout controls need the WINDOW as scroll container, not an inner
-   .document-area overflow box. Otherwise sticky stops working while reading
-   a long multi-page question. */
-.document-area { overflow: visible; }
-@media (max-width: 900px) {
-  .topbar { position: sticky; top: 0; z-index: 60; }
-  .document-area { overflow: visible; }
+/* Layout review: two independent scroll panes, with the review toolbar pinned.
+   Avoid sticky on the editor column: it prevented the left strip from scrolling. */
+@media (min-width: 1201px) {
+  .preview-mode-shell .document-area { overflow: visible; }
+  .preview-review-workspace { min-width: 0; }
+  .preview-review-workspace .independent-scroll-grid {
+    align-items: stretch;
+    height: calc(100dvh - 235px);
+    min-height: 260px;
+    overflow: hidden;
+  }
+  .independent-scroll-grid > .layout-editor-panel,
+  .independent-scroll-grid > .final-pages-panel {
+    min-height: 0;
+    height: 100%;
+    overflow-y: scroll;
+    overflow-x: hidden;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+    position: relative;
+    top: auto;
+    padding: 0 8px 16px 2px;
+  }
+  .independent-scroll-grid .compact-panel-heading {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+    padding: 7px 4px;
+    background: #eef3f8;
+  }
 }
-.layout-sticky-controls { top: 64px; z-index: 35; }
-@media (max-width: 900px) {
-  .layout-sticky-controls { top: 64px; }
+@media (max-width: 1200px) {
+  .independent-scroll-grid > .layout-editor-panel,
+  .independent-scroll-grid > .final-pages-panel { overflow: visible; height: auto; }
 }
