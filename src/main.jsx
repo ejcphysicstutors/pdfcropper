@@ -13,7 +13,7 @@ const END = 'question-end';
 const PART = 'part';
 const PAGE_CONTENT_WIDTH = 706;
 const PAGE_CONTENT_HEIGHT = 1035;
-const APP_VERSION = '0.9.3-whole-question';
+const APP_VERSION = '0.9.4-adaptive-question-boundaries';
 
 const LOCAL_DRAFT_DB = 'prelim-cropper-local-v1';
 const LOCAL_DRAFT_STORE = 'drafts';
@@ -324,6 +324,8 @@ function App() {
   const [viewMode, setViewMode] = useState('segment');
   // Whole-question crops are the default; subpart boundaries remain available on demand.
   const [detailedQuestionIds, setDetailedQuestionIds] = useState([]);
+  const [cropStyle, setCropStyle] = useState('auto');
+  const [cropStyleOverrides, setCropStyleOverrides] = useState({});
   const [outputBreaks, setOutputBreaks] = useState({});
   const [exclusions, setExclusions] = useState({});
   const [trimOverrides, setTrimOverrides] = useState({});
@@ -357,8 +359,8 @@ function App() {
 
   const editableSnapshot = useMemo(() => ({
     headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks,
-    exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt,
-  }), [headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks, exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt]);
+    exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt, cropStyle, cropStyleOverrides,
+  }), [headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks, exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt, cropStyle, cropStyleOverrides]);
   const currentEditFingerprint = useMemo(() => JSON.stringify(editableSnapshot), [editableSnapshot]);
   const jsonState = !file ? null : downloadBaselineFingerprint == null
     ? 'not-downloaded'
@@ -407,7 +409,7 @@ function App() {
   }, [
     file, pages.length, loading, workflowKind, headerPct, footerPct, lines, lineMode,
     showGuides, selectedQuestionId, selectedLineId, selectedSegmentId,
-    segmentLabelOverrides, segmentPartFlags, lastSuggestionIds, viewMode, outputBreaks,
+    segmentLabelOverrides, segmentPartFlags, cropStyle, cropStyleOverrides, lastSuggestionIds, viewMode, outputBreaks,
     exclusions, trimOverrides, globalReviewTrim, segmentationApproved,
     segmentationApprovedAt, approvalIssues, questionPayload, solutionPayload, solutionJsonSaved, reviewedRegionIds,
   ]);
@@ -447,6 +449,8 @@ function App() {
     setExclusions(snapshot.exclusions || {});
     setTrimOverrides(snapshot.trimOverrides || {});
     setGlobalReviewTrim(snapshot.globalReviewTrim || { topExtra: 0, bottomExtra: 0 });
+    setCropStyle(snapshot.cropStyle || 'standard');
+    setCropStyleOverrides(snapshot.cropStyleOverrides || {});
     setSegmentationApproved(Boolean(snapshot.segmentationApproved));
     setSegmentationApprovedAt(snapshot.segmentationApprovedAt || null);
     setApprovalIssues([]);
@@ -583,6 +587,8 @@ function App() {
       setPdf(loadedPdf);
       setPages(nextPages);
       setLines([]);
+      setCropStyle('auto');
+      setCropStyleOverrides({});
       setLastSuggestionIds([]);
       setSelectedQuestionId(null);
       setSelectedLineId(null);
@@ -615,6 +621,8 @@ function App() {
         setExclusions(restoreSnapshot.exclusions || {});
         setTrimOverrides(restoreSnapshot.trimOverrides || {});
         setGlobalReviewTrim(restoreSnapshot.globalReviewTrim || { topExtra: 0, bottomExtra: 0 });
+        setCropStyle(restoreSnapshot.cropStyle || 'standard');
+        setCropStyleOverrides(restoreSnapshot.cropStyleOverrides || {});
         setSegmentationApproved(Boolean(restoreSnapshot.segmentationApproved));
         setSegmentationApprovedAt(restoreSnapshot.segmentationApprovedAt || null);
         setApprovalIssues(Array.isArray(restoreSnapshot.approvalIssues) ? restoreSnapshot.approvalIssues : []);
@@ -669,6 +677,8 @@ function App() {
       selectedSegmentId,
       segmentLabelOverrides,
       segmentPartFlags,
+      cropStyle,
+      cropStyleOverrides,
       lastSuggestionIds,
       viewMode,
       outputBreaks,
@@ -840,6 +850,8 @@ function App() {
       segmentPartFlags,
       lastSuggestionIds: [],
       viewMode: 'segment',
+      cropStyle: payload?.cropStyle || 'standard',
+      cropStyleOverrides: Object.fromEntries((payload?.questions || []).filter((q) => q.cropStyleOverride).map((q) => [q.label, q.cropStyleOverride])),
       outputBreaks,
       exclusions,
       trimOverrides,
@@ -1288,6 +1300,19 @@ function App() {
     });
   }
 
+  // Resolve shared boundaries without modifying imported or manually placed coordinates.
+  // Auto mode uses a conservative whitespace heuristic: only adjacent question
+  // boundaries on the same source page, within 3.5% of page height, qualify.
+  const cropStyleFor = (start, nextStart, currentEnd) => {
+    const override = cropStyleOverrides[start.label];
+    if (!nextStart) return 'standard'; // The final question must have a separate END.
+    if (override === 'standard' || override === 'continuous') return override;
+    if (cropStyle !== 'auto') return cropStyle;
+    if (!nextStart || !currentEnd || currentEnd.page !== nextStart.page) return 'standard';
+    const gap = nextStart.y - currentEnd.y;
+    return gap >= -0.004 && gap <= 0.035 ? 'continuous' : 'standard';
+  };
+
   // Keep detected PART lines in memory, but do not use them in whole-question mode.
   // This preserves existing edits while avoiding compulsory part-by-part review.
   const activeLines = useMemo(() => {
@@ -1399,7 +1424,11 @@ function App() {
           ? { page: nextStart.page, y: Math.max(start.y + 0.02, nextStart.y - 0.006) }
           : { page: nextStart.page - 1, y: 1 - footerPct / 100 - 0.004 })
         : { page: pages.length || start.page, y: 1 - footerPct / 100 - 0.004 };
-      const finalEnd = end || { ...fallbackEnd, id: null, kind: END, virtual: true };
+      const resolvedStyle = cropStyleFor(start, nextStart, end);
+      // A linked boundary is exactly the next question's START. This is derived
+      // each render, so dragging that START moves both sides atomically.
+      const linked = Boolean(nextStart && resolvedStyle === 'continuous');
+      const finalEnd = linked ? { ...nextStart, kind: END, linkedTo: nextStart.id } : (end || { ...fallbackEnd, id: null, kind: END, virtual: true });
       const expectedQuestion = workflowKind === 'solutions' ? questionPayload?.questions?.[index] : null;
       const fallbackLabel = expectedQuestion?.label || start.label || `Q${index + 1}`;
       const expectedPartLabels = workflowKind === 'solutions'
@@ -1487,9 +1516,9 @@ function App() {
           isPart,
         };
       });
-      return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end), label: fallbackLabel, parts, segments };
+      return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end) || linked, cropStyleResolved: resolvedStyle, linked, label: fallbackLabel, parts, segments };
     });
-  }, [activeLines, footerPct, pages, segmentLabelOverrides, segmentPartFlags, workflowKind, questionPayload]);
+  }, [activeLines, footerPct, pages, segmentLabelOverrides, segmentPartFlags, workflowKind, questionPayload, cropStyle, cropStyleOverrides]);
 
   useEffect(() => {
     if (!regions.length) { setSelectedQuestionId(null); return; }
@@ -1530,6 +1559,8 @@ function App() {
         label: isSolution ? (questionPayload?.questions?.[index]?.label || region.label) : region.label,
         start: { page: region.start.page, yFractionFromTop: round4(region.start.y) },
         end: { page: region.end.page, yFractionFromTop: round4(region.end.y), explicit: region.endExplicit },
+        cropStyleResolved: region.cropStyleResolved,
+        cropStyleOverride: cropStyleOverrides[region.start.label] || null,
         parts: region.parts.map((part) => ({
           start: { page: part.page, yFractionFromTop: round4(part.y) },
         })),
@@ -1554,6 +1585,7 @@ function App() {
         },
         pageTrimOverrides: Object.entries(trimOverrides[region.id] || {}).map(([page, trim]) => ({ page: Number(page), extraTopFraction: round4(trim.topExtra || 0), extraBottomFraction: round4(trim.bottomExtra || 0) })),
       })),
+      cropStyle,
       segmentationApproval: {
         approved: approvalOverride?.approved ?? segmentationApproved,
         approvedAt: approvalOverride?.approvedAt ?? segmentationApprovedAt,
@@ -1792,6 +1824,7 @@ function App() {
     starts.forEach((start, index) => {
       const nextStart = starts[index + 1] || null;
       const matchingEnds = ends.filter((line) => comparePos(line, start) > 0 && (!nextStart || comparePos(line, nextStart) < 0));
+      if (cropStyleFor(start, nextStart, matchingEnds[0]) === 'continuous' && nextStart) return;
       if (matchingEnds.length === 0) {
         issues.push({ type: 'question', regionId: start.id, message: `${start.label || `Q${index + 1}`} has no explicit END line.` });
       } else if (matchingEnds.length > 1) {
@@ -2089,6 +2122,25 @@ function App() {
                 </div>
                 {selectedRegion && (
                   <div className="whole-question-choice">
+                    <label className="crop-style-control">Paper cropping style
+                      <select value={cropStyle} onChange={(event) => { setCropStyle(event.target.value); setSegmentationApproved(false); }}>
+                        <option value="auto">Auto-detect (recommended for new papers)</option>
+                        <option value="standard">Standard: separate start and end</option>
+                        <option value="continuous">Continuous: next start is previous end</option>
+                      </select>
+                    </label>
+                    <label className="crop-style-control">{selectedRegion.label} cropping override
+                      <select value={cropStyleOverrides[selectedRegion.start.label] || 'inherit'} onChange={(event) => {
+                        const value = event.target.value;
+                        setCropStyleOverrides((current) => { const next = { ...current }; if (value === 'inherit') delete next[selectedRegion.start.label]; else next[selectedRegion.start.label] = value; return next; });
+                        setSegmentationApproved(false);
+                      }}>
+                        <option value="inherit">Use paper setting ({selectedRegion.cropStyleResolved})</option>
+                        <option value="standard">Set separate end manually</option>
+                        <option value="continuous">End at next question's start</option>
+                      </select>
+                    </label>
+                    <p className="small">{selectedRegion.linked ? 'Linked: moving the next question start also changes this question end.' : 'Separate end: adjust the end marker independently.'}</p>
                     <strong>{detailedQuestionIds.includes(selectedRegion.id) ? 'Subpart cropping enabled' : 'Full question crop'}</strong>
                     <p className="small">{detailedQuestionIds.includes(selectedRegion.id) ? 'Blue part boundaries are editable for this question only.' : 'Only the start and end of this question need checking. Header/footer cleanup, exclusions and page review still work as usual.'}</p>
                     <button type="button" className="ghost full" onClick={() => {
@@ -2182,7 +2234,7 @@ function App() {
               <div className="rolling-paper">
                 {pages.map((pageData) => (
                   <PdfPage key={pageData.pageNumber} pageData={pageData} headerPct={headerPct} footerPct={footerPct}
-                    lines={activeLines.filter((line) => line.page === pageData.pageNumber)} lineMode={heldLineMode || lineMode} onAddLine={addLine}
+                    lines={activeLines.filter((line) => line.page === pageData.pageNumber && !(line.kind === END && regions.some((region) => region.linked && region.start.page <= line.page && comparePos(line, region.start) > 0 && comparePos(line, region.end) < 0)))} lineMode={heldLineMode || lineMode} onAddLine={addLine}
                     onMoveLine={moveLine} onRemoveLine={removeLine} showGuides={showGuides} regions={regions} selectedLineId={selectedLineId} onSelectLine={setSelectedLineId}
                     selectedQuestionId={selectedQuestionId} selectedSegmentId={selectedSegmentId} onSelectSegment={selectSegmentForEditing} />
                 ))}
@@ -3166,3 +3218,4 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
 }
 
 createRoot(document.getElementById('root')).render(<React.StrictMode><AppErrorBoundary><App /></AppErrorBoundary></React.StrictMode>);
+

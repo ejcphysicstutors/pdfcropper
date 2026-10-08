@@ -628,3 +628,7 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
 .whole-question-choice { margin: 12px 0; padding: 12px; border: 1px solid #c7d8f5; background: #f3f7ff; border-radius: 12px; }
 .whole-question-choice strong { display: block; margin-bottom: 5px; }
 .whole-question-choice .small { margin: 3px 0 10px; }
+
+/* Adaptive whole-question cropping controls */
+.crop-style-control { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; font-weight: 650; }
+.crop-style-control select { width: 100%; max-width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #bfcbdc; border-radius: 9px; background: #fff; color: #243b58; font: inherit; }
