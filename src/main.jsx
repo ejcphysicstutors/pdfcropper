@@ -1502,17 +1502,19 @@ function App() {
           }
         }
 
-        const override = segmentLabelOverrides[boundary.id];
+        // Whole-question mode must never inherit an (a)/(i) marker as its label.
+        const wholeQuestion = parts.length === 0;
+        const override = wholeQuestion ? null : segmentLabelOverrides[boundary.id];
         const isPart = segmentPartFlags[boundary.id] !== false;
         return {
           id: boundary.id,
           start: boundary,
           end: segmentEnd,
-          label: override || inferred,
-          autoLabel: inferred,
-          labelEvidence: evidence,
-          detectedMarker: marker.raw,
-          labelEditedByUser: Boolean(override),
+          label: wholeQuestion ? fallbackLabel : (override || inferred),
+          autoLabel: wholeQuestion ? fallbackLabel : inferred,
+          labelEvidence: wholeQuestion ? 'Whole-question crop' : evidence,
+          detectedMarker: wholeQuestion ? null : marker.raw,
+          labelEditedByUser: wholeQuestion ? false : Boolean(override),
           isPart,
         };
       });
@@ -2108,14 +2110,15 @@ function App() {
                 {!!regions.length && segmentationApproved && <p className="review-progress-copy approval-ok">✓ Questions and parts approved</p>}
                 <div className="region-list question-list">
                   {regions.map((region) => {
-                    const partSegments = region.segments.filter((segment) => segment.isPart !== false);
+                    const detailed = detailedQuestionIds.includes(region.id);
+                    const partSegments = detailed ? region.segments.filter((segment) => segment.isPart !== false) : [];
                     const partCount = partSegments.length;
                     const partLabels = partSegments.map((segment) => String(segment.label || '').replace(new RegExp(`^${region.label}\\s*`, 'i'), '')).filter(Boolean);
                     const hasIssue = issueRegionIds.has(region.id);
                     return (
                       <button key={region.id} className={`region-row richer-row ${selectedQuestionId === region.id ? 'selected' : ''}`} onClick={() => jumpToQuestion(region.id)}>
-                        <span className="region-main"><span className={`qa-dot ${hasIssue ? 'warn' : 'ok'}`}>{hasIssue ? '!' : '✓'}</span><span className="region-row-copy"><span className="region-name">{region.label}</span><small title={partLabels.join(' · ')}>{partLabels.length ? partLabels.join(' · ') : 'No parts identified'}</small></span></span>
-                        <span className={`region-status ${hasIssue ? 'warn' : 'ok'}`}>{hasIssue ? 'check' : `${partCount}`}</span>
+                        <span className="region-main"><span className={`qa-dot ${hasIssue ? 'warn' : 'ok'}`}>{hasIssue ? '!' : '✓'}</span><span className="region-row-copy"><span className="region-name">{region.label}</span><small title={partLabels.join(' · ')}>{detailed ? (partLabels.length ? partLabels.join(' · ') : 'No parts identified') : 'Whole question'}</small></span></span>
+                        <span className={`region-status ${hasIssue ? 'warn' : 'ok'}`}>{hasIssue ? 'check' : (detailed ? `${partCount}` : 'whole')}</span>
                       </button>
                     );
                   })}
