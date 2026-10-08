@@ -497,3 +497,86 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
   margin-bottom: 10px;
   box-shadow: 0 3px 10px rgba(35, 50, 74, .06);
 }
+
+/* Readable shortcut/help dialog */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, .42);
+  backdrop-filter: blur(2px);
+}
+.help-modal {
+  width: min(720px, 94vw);
+  max-height: min(760px, 88vh);
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid #d7dee7;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, .22);
+}
+.modal-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+.modal-heading h2 {
+  margin: 3px 0 0;
+  font-size: 1.25rem;
+}
+.shortcut-grid {
+  display: grid;
+  grid-template-columns: minmax(145px, 190px) minmax(0, 1fr);
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid #dfe6ed;
+  border-radius: 12px;
+  background: #fff;
+}
+.shortcut-grid > * {
+  min-width: 0;
+  padding: 11px 13px;
+  border-bottom: 1px solid #edf1f5;
+}
+.shortcut-grid > :nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+.shortcut-grid kbd {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+  background: #f4f7fa;
+  color: #172033;
+  border-right: 1px solid #dfe6ed;
+  font: 800 .78rem/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: normal;
+}
+.shortcut-grid span {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+  color: #475569;
+  font-size: .86rem;
+  line-height: 1.4;
+}
+.help-modal > .small {
+  margin-top: 15px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+@media (max-width: 560px) {
+  .modal-backdrop { padding: 12px; }
+  .help-modal { padding: 16px; }
+  .shortcut-grid { grid-template-columns: 1fr; }
+  .shortcut-grid kbd { border-right: 0; border-bottom: 0; padding-bottom: 4px; min-height: auto; }
+  .shortcut-grid span { padding-top: 4px; }
+  .shortcut-grid > :nth-last-child(-n + 2) { border-bottom: 1px solid #edf1f5; }
+  .shortcut-grid > :last-child { border-bottom: 0; }
+}

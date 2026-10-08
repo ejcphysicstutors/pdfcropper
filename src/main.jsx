@@ -777,7 +777,13 @@ function App() {
       if (!startLine) continue;
       const regionId = startLine.id;
       outputBreaks[regionId] = Array.isArray(question.outputPageBreakFractions) ? question.outputPageBreakFractions : [];
-      exclusions[regionId] = Array.isArray(question.excludedOutputRanges) ? question.excludedOutputRanges : [];
+      exclusions[regionId] = Array.isArray(question.excludedOutputRanges)
+        ? question.excludedOutputRanges.map((range) => ({
+            id: range.id || makeId('exclude'),
+            start: Number.isFinite(Number(range.start)) ? Number(range.start) : Number(range.startFraction),
+            end: Number.isFinite(Number(range.end)) ? Number(range.end) : Number(range.endFraction),
+          })).filter((range) => Number.isFinite(range.start) && Number.isFinite(range.end))
+        : [];
       const perPageTrim = {};
       for (const trim of question.pageTrimOverrides || []) {
         perPageTrim[Number(trim.page)] = {
@@ -2517,11 +2523,16 @@ function makeFinalPages(strip, breaks) {
 
 
 function normalizeExclusions(ranges) {
-  const sorted = (ranges || []).map((range) => ({
-    id: range.id || makeId('exclude'),
-    start: clamp(Math.min(range.start, range.end), 0, 1),
-    end: clamp(Math.max(range.start, range.end), 0, 1),
-  })).filter((range) => range.end - range.start > 0.002).sort((a, b) => a.start - b.start);
+  const sorted = (ranges || []).map((range) => {
+    const rawStart = Number.isFinite(Number(range?.start)) ? Number(range.start) : Number(range?.startFraction);
+    const rawEnd = Number.isFinite(Number(range?.end)) ? Number(range.end) : Number(range?.endFraction);
+    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) return null;
+    return {
+      id: range.id || makeId('exclude'),
+      start: clamp(Math.min(rawStart, rawEnd), 0, 1),
+      end: clamp(Math.max(rawStart, rawEnd), 0, 1),
+    };
+  }).filter(Boolean).filter((range) => range.end - range.start > 0.002).sort((a, b) => a.start - b.start);
   const merged = [];
   for (const range of sorted) {
     const last = merged[merged.length - 1];
