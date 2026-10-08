@@ -616,3 +616,10 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
   .independent-scroll-grid > .layout-editor-panel,
   .independent-scroll-grid > .final-pages-panel { overflow: visible; height: auto; }
 }
+
+/* Precise exclusion adjustment in the original strip, separate from A4 output. */
+.exclusion-resize-handle { position: absolute; left: 50%; transform: translateX(-50%); z-index: 12; padding: 2px 12px; min-height: 19px; font-size: 10px; line-height: 1.2; border: 1px solid #475569; border-radius: 6px; background: #f8fafc; color: #334155; font-weight: 800; cursor: ns-resize; touch-action: none; white-space: nowrap; }
+.exclusion-resize-handle.top { top: -10px; }
+.exclusion-resize-handle.bottom { bottom: -10px; }
+.exclusion-resize-handle:hover, .exclusion-resize-handle:focus-visible { background: #dbeafe; outline: 2px solid #60a5fa; }
+.exclusion-boundary-warning { margin: 0 0 10px; padding: 10px 12px; border: 1px solid #e8b85d; border-radius: 10px; background: #fff8e8; color: #765116; font-size: .82rem; line-height: 1.45; }

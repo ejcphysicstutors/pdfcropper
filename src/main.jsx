@@ -2937,10 +2937,11 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       </div>
 
       {manualBreakInsidePart.length > 0 && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Saved page break inside a question part:</strong> {manualBreakInsidePart.map((item) => `${item.label} (${(item.fraction * 100).toFixed(1)}%)`).join(', ')}. This intentionally divides the part across output pages. Drag the purple line to the beginning of the part to keep it together, or use Reset smart breaks.</div>}
+      {savedExclusions.some((range) => strip.partFractions.some((part) => part.fraction > range.start && part.fraction < range.end)) && <div role="status" className="exclusion-boundary-warning"><strong>Check excluded question parts:</strong> One or more grey bands cross a blue part boundary. This may be intentional when removing repeated questions from solutions. Review the right-hand preview; drag the top/bottom edge of a grey band to keep more working without restoring the entire band.</div>}
       {breakWarning && <div role="alert" style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #e8b85d', borderRadius: 10, background: '#fff8e8', color: '#765116', fontSize: '.82rem', lineHeight: 1.45 }}><strong>Page fit warning:</strong> {breakWarning}</div>}
 
       {showExcludeHelp && <div style={{ margin: '0 0 10px', padding: '10px 12px', border: '1px solid #cfd8e6', borderRadius: 10, background: '#fff', color: '#43516a', fontSize: '.82rem', lineHeight: 1.45 }}>
-        <strong style={{ color: '#24324a' }}>Remove content or blank space:</strong> click <strong>Remove blank space</strong> (or press <kbd>X</kbd>), then drag vertically across the unwanted band in <strong>Edit crop</strong>. The grey <strong>EXCLUDED</strong> regions are permanently omitted from the output preview and are recorded in the saved question/solution JSON. Double-click a band to restore it.
+        <strong style={{ color: '#24324a' }}>Remove content or blank space:</strong> click <strong>Remove blank space</strong> (or press <kbd>X</kbd>), then drag vertically across the unwanted band in <strong>Edit crop</strong>. The grey <strong>EXCLUDED</strong> regions are omitted from the output preview and recorded in the saved question/solution JSON. <strong>Drag the top or bottom handle</strong> of a grey region to adjust exactly what is omitted. Double-click the region to restore all of it.
       </div>}
 
       <div className="preview-grid independent-scroll-grid" key={region.id}>
@@ -3046,6 +3047,37 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
     target.addEventListener('pointermove', move); target.addEventListener('pointerup', up); target.addEventListener('pointercancel', up);
   }
 
+  // Fine tune an existing excluded band without losing the rest of the crop.
+  // Coordinates remain relative to the ORIGINAL strip and are saved unchanged
+  // through the existing JSON serialization path.
+  function beginExclusionResize(event, range, edge) {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.currentTarget;
+    const pointerId = event.pointerId;
+    const original = normalizeExclusions(exclusions);
+    const stableId = range.id;
+    let latest = edge === 'start' ? range.start : range.end;
+    target.setPointerCapture(pointerId);
+    const move = (moveEvent) => {
+      latest = clamp(fractionFromEvent(moveEvent), edge === 'start' ? 0 : range.start + 0.006,
+        edge === 'start' ? range.end - 0.006 : 1);
+      const next = original.map((item) => item.id !== stableId ? item : {
+        ...item, [edge]: round4(latest),
+      });
+      onExclusionsChange(next);
+    };
+    const done = () => {
+      try { target.releasePointerCapture(pointerId); } catch (_) {}
+      target.removeEventListener('pointermove', move);
+      target.removeEventListener('pointerup', done);
+      target.removeEventListener('pointercancel', done);
+    };
+    target.addEventListener('pointermove', move);
+    target.addEventListener('pointerup', done);
+    target.addEventListener('pointercancel', done);
+  }
+
   function beginExclude(event) {
     if (addBreakAt(event)) return;
     if (!excludeMode || event.target.closest('.page-break-line') || event.target.closest('.excluded-band')) return;
@@ -3076,7 +3108,9 @@ function StripBreakEditor({ strip, breaks, onBreaksChange, exclusions, onExclusi
       {strip.partFractions.map((part) => <div key={part.id} className="preview-part-guide" style={{ top: `${part.fraction * 100}%` }}><span>{part.label}</span></div>)}
       {normalizeExclusions(exclusions).map((range, index) => (
         <div key={range.id || `exclude-${index}`} className="excluded-band" style={{ top: `${range.start * 100}%`, height: `${(range.end - range.start) * 100}%` }} onDoubleClick={(event) => { event.stopPropagation(); onExclusionsChange((exclusions || []).filter((item) => item.id !== range.id)); }} title="Excluded from final output. Double-click to restore.">
-          <span>EXCLUDED · double-click to restore</span>
+          <button type="button" className="exclusion-resize-handle top" title="Drag to adjust where the exclusion starts" aria-label={`Adjust top of excluded band ${index + 1}`} onPointerDown={(event) => beginExclusionResize(event, range, 'start')}>↕ top</button>
+          <span>EXCLUDED {index + 1} · {((range.end - range.start) * 100).toFixed(1)}% · double-click to restore</span>
+          <button type="button" className="exclusion-resize-handle bottom" title="Drag to adjust where the exclusion ends" aria-label={`Adjust bottom of excluded band ${index + 1}`} onPointerDown={(event) => beginExclusionResize(event, range, 'end')}>↕ bottom</button>
         </div>
       ))}
       {draftExclude && <div className="excluded-band draft" style={{ top: `${draftTop * 100}%`, height: `${draftHeight * 100}%` }}><span>Exclude this gap</span></div>}
