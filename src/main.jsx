@@ -2531,24 +2531,14 @@ function automaticBreaks(stripWidth, stripHeight, partFractions) {
   while (current + sourcePageHeight < stripHeight - 1 && guard < 200) {
     guard += 1;
     const target = current + sourcePageHeight;
-    const candidates = boundaryYs.filter((y) => y > current + 8 && y <= target + 1);
-
-    // The latest boundary before the physical page end is the start of the
-    // part that would otherwise be split. Move the break there only when that
-    // whole part can fit on a fresh page. If that part is itself taller than a
-    // page, splitting it is unavoidable, so use the physical page limit.
+    const all = [0, ...boundaryYs, stripHeight];
+    const partIndex = all.findIndex((y, i) => i + 1 < all.length && target > y + 1 && target < all[i + 1] - 1);
     let breakY = target;
-    if (candidates.length) {
-      const candidate = candidates[candidates.length - 1];
-      const nextBoundary = boundaryYs.find((y) => y > candidate + 1) ?? stripHeight;
-      const candidatePartHeight = nextBoundary - candidate;
-      if (candidatePartHeight <= sourcePageHeight + 1) breakY = candidate;
+    if (partIndex >= 0) {
+      const partStart = all[partIndex];
+      const partEnd = all[partIndex + 1];
+      if (partStart > current + 8 && partEnd - partStart <= sourcePageHeight + 1) breakY = partStart;
     }
-
-    // No usable part boundary exists because the current part itself is taller
-    // than a page. Split that oversized part at the physical page limit and
-    // continue; the next loop adds another break if the remainder still
-    // overflows.
     if (breakY <= current + 8) breakY = target;
     breakY = Math.min(breakY, stripHeight - 1);
     breaks.push(round4(breakY / stripHeight));
@@ -2601,15 +2591,20 @@ function normalizeBreaksForPageCapacity(stripWidth, stripHeight, partFractions, 
   )].sort((a, b) => a - b);
 
   function safeBreakBefore(current, target) {
-    const candidates = boundaryYs.filter((y) => y > current + 8 && y <= target + 1);
-    if (!candidates.length) return target;
-
-    // Prefer the latest part boundary that fits before the physical page end.
-    // If the part beginning there is itself taller than a page, splitting that
-    // oversized part is unavoidable, so use the physical page limit instead.
-    const candidate = candidates[candidates.length - 1];
-    const nextBoundary = boundaryYs.find((y) => y > candidate + 1) ?? stripHeight;
-    if (nextBoundary - candidate <= pageHeight + 1) return candidate;
+    // The A4 edge may land INSIDE a detected part. In that case the correct
+    // boundary is the START of that part, not the latest arbitrarily chosen
+    // boundary. If the part itself fits on a fresh A4 page, move it there.
+    const all = [0, ...boundaryYs, stripHeight];
+    const partIndex = all.findIndex((y, i) => i + 1 < all.length && target > y + 1 && target < all[i + 1] - 1);
+    if (partIndex >= 0) {
+      const partStart = all[partIndex];
+      const partEnd = all[partIndex + 1];
+      if (partStart > current + 8 && partEnd - partStart <= pageHeight + 1) return partStart;
+    }
+    // At an exact part boundary, finish the page at that boundary.
+    const onBoundary = boundaryYs.find((y) => Math.abs(y - target) <= 1 && y > current + 8);
+    if (onBoundary != null) return onBoundary;
+    // An oversized or unrecognised part cannot fit without splitting.
     return target;
   }
 
@@ -2934,9 +2929,9 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
     compacted.canvas.width,
     compacted.canvas.height,
     paginationParts,
-    paginationMode === 'manual' ? preferredBreaks : keepCompletePartsAtPageBreaks(
+    paginationMode === 'compact' ? keepCompletePartsAtPageBreaks(
       compacted.canvas.width, compacted.canvas.height, paginationParts, preferredBreaks,
-    ),
+    ) : preferredBreaks,
   );
   function saveTeacherBreaks(nextBreaks) {
     setPaginationMode('manual');
