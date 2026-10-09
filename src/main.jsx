@@ -377,12 +377,76 @@ function GridCellImage({ pageData, cell }) {
   return <canvas ref={ref} style={{ width: '100%', height: 'auto', display: 'block' }} />;
 }
 
+function GridPageCropEditor({ pageData, cell, onCropChange }) {
+  const canvasRef = useRef(null);
+  const surfaceRef = useRef(null);
+  const dragRef = useRef(null);
+  useEffect(() => {
+    let cancelled = false;
+    let task;
+    async function renderPage() {
+      if (!pageData || !canvasRef.current) return;
+      const canvas = canvasRef.current;
+      const viewport = pageData.viewport;
+      if (!(viewport.width > 0 && viewport.height > 0)) return;
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      task = pageData.page.render({ canvasContext: canvas.getContext('2d'), viewport });
+      await task.promise;
+    }
+    renderPage().catch((e) => { if (!cancelled && e.name !== 'RenderingCancelledException') console.error(e); });
+    return () => { cancelled = true; if (task) task.cancel(); };
+  }, [pageData]);
+  function startDrag(event, edge) {
+    if (event.button !== 0 || !surfaceRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = surfaceRef.current.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    dragRef.current = { edge, pointerId: event.pointerId, initial: { ...cell }, rect,
+      x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+  function moveDrag(event) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = (event.clientX - drag.x) / drag.rect.width;
+    const dy = (event.clientY - drag.y) / drag.rect.height;
+    const next = { ...drag.initial };
+    if (drag.edge.includes('l')) next.x0 = round4(clamp(drag.initial.x0 + dx, 0, drag.initial.x1 - 0.05));
+    if (drag.edge.includes('r')) next.x1 = round4(clamp(drag.initial.x1 + dx, drag.initial.x0 + 0.05, 1));
+    if (drag.edge.includes('t')) next.y0 = round4(clamp(drag.initial.y0 + dy, 0, drag.initial.y1 - 0.02));
+    if (drag.edge.includes('b')) next.y1 = round4(clamp(drag.initial.y1 + dy, drag.initial.y0 + 0.02, 1));
+    onCropChange(next);
+  }
+  function stopDrag(event) {
+    if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
+  }
+  const handles = [
+    ['t', 'top'], ['b', 'bottom'], ['l', 'left'], ['r', 'right'],
+    ['tl', 'top-left'], ['tr', 'top-right'], ['bl', 'bottom-left'], ['br', 'bottom-right'],
+  ];
+  return <div className="grid-source-page" ref={surfaceRef}>
+    <canvas ref={canvasRef} className="grid-source-canvas" />
+    <div className="grid-crop-region" style={{ left: `${cell.x0 * 100}%`, top: `${cell.y0 * 100}%`,
+      width: `${(cell.x1 - cell.x0) * 100}%`, height: `${(cell.y1 - cell.y0) * 100}%` }}>
+      <span className="grid-crop-tag">{cell.label} crop</span>
+      {handles.map(([edge, name]) => <div key={edge} aria-label={`Drag ${name} crop edge`} className={`grid-crop-handle grid-handle-${edge}`}
+        onPointerDown={(event) => startDrag(event, edge)} onPointerMove={moveDrag}
+        onPointerUp={stopDrag} onPointerCancel={stopDrag} />)}
+    </div>
+  </div>;
+}
+
 function GridSolutionsWorkspace({ pages, cells, setCells, sourceName, onExit }) {
   const [selected, setSelected] = useState(0);
   const cell = cells[selected];
   const pageData = pages.find((p) => p.pageNumber === cell?.page);
   function update(field, value) {
     setCells((current) => current.map((entry, i) => i !== selected ? entry : { ...entry, [field]: round4(value), detected: false }));
+  }
+  function updateCrop(next) {
+    setCells((current) => current.map((entry, i) => i !== selected ? entry : { ...entry, ...next, detected: false }));
   }
   function save() {
     const questions = cells.map((entry) => ({
@@ -423,6 +487,9 @@ function GridSolutionsWorkspace({ pages, cells, setCells, sourceName, onExit }) 
             <label key={field}>{label} <input type="range" min={min} max={max} step="0.001" value={cell[field]} onChange={(event) => update(field, Number(event.target.value))} /><span>{Math.round(cell[field] * 100)}%</span></label>
           )}
         </div>
+        <p className="grid-drag-hint">Drag the blue box edges or corners on the source page. The sliders above work too.</p>
+        <div className="grid-source-stage"><GridPageCropEditor key={cell.page} pageData={pageData} cell={cell} onCropChange={updateCrop} /></div>
+        <h4 className="grid-crop-result-title">Cropped answer preview</h4>
         <div className="grid-cell-preview"><GridCellImage pageData={pageData} cell={cell} /></div>
         <p className="panel-note">Check especially the bottom of each row and diagrams near the centre divider. These crop coordinates are saved independently for every answer.</p>
       </div>

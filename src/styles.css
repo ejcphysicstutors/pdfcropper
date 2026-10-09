@@ -661,3 +661,23 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
 .grid-edit-controls span { width:36px; text-align:right; }
 .grid-cell-preview { max-width:620px; background:white; border:1px solid #b8cadd; box-shadow:0 2px 12px #132a4420; overflow:auto; }
 @media(max-width:700px) { .grid-solutions-body { grid-template-columns:80px minmax(0,1fr); gap:8px; } .grid-edit-controls { grid-template-columns:1fr; } }
+
+/* Direct rectangular crop editing on the full source page. */
+.grid-drag-hint { margin: 5px 0 10px; color: #385574; font-size: 13px; }
+.grid-source-stage { width: min(100%, 680px); margin-bottom: 15px; }
+.grid-source-page { position: relative; width: 100%; line-height: 0; background: #fff; box-shadow: 0 1px 8px #10243d25; user-select: none; }
+.grid-source-canvas { display: block; width: 100%; height: auto; pointer-events: none; }
+.grid-crop-region { position: absolute; box-sizing: border-box; border: 2px solid #277de3; background: #2984ef14; pointer-events: none; line-height: normal; }
+.grid-crop-tag { position: absolute; top: 0; left: 0; padding: 2px 6px; background: #176fce; color: white; font-size: 11px; font-weight: 750; white-space: nowrap; }
+.grid-crop-handle { position: absolute; z-index: 2; pointer-events: auto; touch-action: none; outline-offset: 2px; }
+.grid-crop-handle:hover, .grid-crop-handle:focus-visible { background-color: #277de347; outline: 2px solid #0956ad; }
+.grid-handle-t, .grid-handle-b { left: 11px; right: 11px; height: 14px; cursor: ns-resize; }
+.grid-handle-t { top: -8px; } .grid-handle-b { bottom: -8px; }
+.grid-handle-l, .grid-handle-r { top: 11px; bottom: 11px; width: 14px; cursor: ew-resize; }
+.grid-handle-l { left: -8px; } .grid-handle-r { right: -8px; }
+.grid-handle-tl, .grid-handle-tr, .grid-handle-bl, .grid-handle-br { width: 17px; height: 17px; background: #fff; border: 2px solid #277de3; border-radius: 4px; }
+.grid-handle-tl { left: -9px; top: -9px; cursor: nwse-resize; }
+.grid-handle-tr { right: -9px; top: -9px; cursor: nesw-resize; }
+.grid-handle-bl { left: -9px; bottom: -9px; cursor: nesw-resize; }
+.grid-handle-br { right: -9px; bottom: -9px; cursor: nwse-resize; }
+.grid-crop-result-title { margin: 14px 0 8px; font-size: 14px; }
