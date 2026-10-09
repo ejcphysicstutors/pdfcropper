@@ -1430,7 +1430,9 @@ function App() {
       const linked = Boolean(nextStart && resolvedStyle === 'continuous');
       const finalEnd = linked ? { ...nextStart, kind: END, linkedTo: nextStart.id } : (end || { ...fallbackEnd, id: null, kind: END, virtual: true });
       const expectedQuestion = workflowKind === 'solutions' ? questionPayload?.questions?.[index] : null;
-      const fallbackLabel = expectedQuestion?.label || start.label || `Q${index + 1}`;
+      // Non-manual detector labels are hints, not approval requirements.
+      // In whole-question mode the ordered starts define Q1, Q2, ... .
+      const fallbackLabel = expectedQuestion?.label || (start.manualLabel ? (start.label || '') : `Q${index + 1}`);
       const expectedPartLabels = workflowKind === 'solutions'
         ? authoritativeQuestionSegments(expectedQuestion).map((segment) => segment.label).filter(Boolean)
         : [];
@@ -1605,7 +1607,7 @@ function App() {
         page: line.page,
         yFractionFromTop: round4(line.y),
         type: line.kind,
-        label: line.label || null,
+        label: line.kind === START && !line.manualLabel ? `Q${[...activeLines].filter((item) => item.kind === START).sort(comparePos).findIndex((item) => item.id === line.id) + 1}` : (line.label || null),
         labelEditedByUser: Boolean(line.manualLabel),
         source: line.source || 'manual',
       })),
@@ -1814,21 +1816,21 @@ function App() {
     }
 
     if (workflowKind !== 'solutions') {
-      const parsedNumbers = starts.map((line) => {
-        const match = String(line.label || '').match(/Q?\s*(\d{1,2})/i);
-        return match ? Number(match[1]) : null;
-      });
-      if (parsedNumbers.some((number) => number == null)) {
-        const badIndex = parsedNumbers.findIndex((number) => number == null);
-        issues.push({ type: 'paper', lineId: starts[badIndex]?.id, page: starts[badIndex]?.page, message: 'One or more question starts has no usable question number. Check the question labels.' });
-      } else if (parsedNumbers.length) {
-        const expected = parsedNumbers.map((_, index) => index + 1);
-        const same = parsedNumbers.length === expected.length && parsedNumbers.every((number, index) => number === expected[index]);
-        if (!same) {
-          const mismatchIndex = parsedNumbers.findIndex((number, index) => number !== expected[index]);
-          issues.push({ type: 'paper', lineId: starts[mismatchIndex]?.id, page: starts[mismatchIndex]?.page, message: `Question starts are not a clean Q1–Q${starts.length} sequence (${parsedNumbers.map((n) => n ?? '?').join(', ')}). This often indicates an extra detected START line.` });
+      // Labels assigned by automatic PDF detection can be blank or stale after
+      // teachers move/add starts. The ordered sequence is authoritative unless
+      // the teacher explicitly entered an override.
+      starts.forEach((start, index) => {
+        if (!start.manualLabel) return;
+        const supplied = String(start.label || '').trim();
+        const matched = supplied.match(/^Q\s*(\d{1,2})$/i);
+        const expected = index + 1;
+        if (!matched || Number(matched[1]) !== expected) {
+          issues.push({
+            type: 'paper', lineId: start.id, page: start.page,
+            message: `Question ${expected} on PDF page ${start.page}: manual label "${supplied || '(blank)'}" should be Q${expected}. Edit this label or use automatic numbering.`,
+          });
         }
-      }
+      });
     }
 
     starts.forEach((start, index) => {
@@ -1943,8 +1945,8 @@ function App() {
     if (issues.length) {
       setSegmentationApproved(false);
       setSegmentationApprovedAt(null);
-      const first = issues.find((issue) => issue.regionId);
-      if (first?.regionId) jumpToQuestion(first.regionId);
+      const first = issues.find((issue) => issue.lineId || issue.regionId || issue.page);
+      if (first) jumpToIssue(first);
       setStatus(`Cannot approve yet: ${issues.length} structural issue${issues.length === 1 ? '' : 's'} found. Fix the flagged START / END / PART lines first.`);
       return;
     }
@@ -2166,7 +2168,7 @@ function App() {
                 )}
                 {selectedRegion && detailedQuestionIds.includes(selectedRegion.id) && (
                   <div className="label-editor">
-                    <label>Question label<input value={selectedRegion.start.label || selectedRegion.label} disabled={workflowKind === 'solutions'} onChange={(e) => updateLineLabel(selectedRegion.start.id, e.target.value)} /></label>
+                    <label>Question label<input value={selectedRegion.label} disabled={workflowKind === 'solutions'} onChange={(e) => updateLineLabel(selectedRegion.start.id, e.target.value)} /></label>
                     <div className="segment-label-list">
                       {selectedRegion.segments.map((segment) => (
                         <button key={segment.id} type="button" className={`segment-label-row ${selectedSegmentId === segment.id ? 'selected' : ''} ${segment.isPart === false ? 'not-part' : ''}`} onClick={() => setSelectedSegmentId(segment.id)}>
@@ -2203,7 +2205,7 @@ function App() {
                         <button type="button" className={`issue-jump ${issue.regionId || issue.lineId || issue.page ? 'clickable' : ''}`} onClick={() => jumpToIssue(issue)} disabled={!issue.regionId && !issue.lineId && !issue.page}>
                           <span>{issue.message}</span>
                           {!!issue.expectedLabels?.length && <small>Expected parts: {issue.expectedLabels.join(' · ')}</small>}
-                          {(issue.regionId || issue.lineId || issue.page) && <em>{issue.lineId ? `Go to problem on page ${issue.page || ''}` : issue.regionId ? `Go to ${regions.find((region) => region.id === issue.regionId)?.label || 'question'}` : `Go to page ${issue.page}`} →</em>}
+                          {(issue.regionId || issue.lineId || issue.page) && <em>{issue.lineId ? `Go to highlighted boundary on page ${issue.page || ''}` : issue.regionId ? `Go to ${regions.find((region) => region.id === issue.regionId)?.label || 'question'}` : `Go to page ${issue.page}`} →</em>}
                         </button>
                       </li>
                     ))}</ul>
