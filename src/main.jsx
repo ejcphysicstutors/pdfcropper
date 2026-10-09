@@ -252,6 +252,45 @@ function isMcqAnswerKeyRow(text) {
   return numbers.length >= 3 && options.length >= 3;
 }
 
+// Entire MCQ answer-key tables are not question statements.  PDF text extraction
+// can split a table into several items/rows, so filtering only individual
+// number-and-letter cells is insufficient (DHS 2026 Paper 1 regression).
+function answerKeyBottomOnPage(rows) {
+  const ordered = [...(rows || [])].sort((a, b) => a.yNorm - b.yNorm);
+  const headerIndex = ordered.findIndex((row) => /\b(?:suggested\s+ans(?:wers?)?|answer\s+key)\b/i.test(row.text));
+  if (headerIndex < 0) return null;
+  const headerY = ordered[headerIndex].yNorm;
+  let lastKeyRow = headerY;
+  let keyRows = 0;
+  for (const row of ordered.slice(headerIndex + 1)) {
+    if (row.yNorm - headerY > 0.40) break;
+    const text = normalizePrintedMarkerText(row.text);
+    const pairs = [...text.matchAll(/(?:^|\s)\d{1,2}\s*[.):]?\s*[A-D](?=\s|$|[|])/gi)];
+    // A broad row of number + option pairs is strong evidence of a key table.
+    if (pairs.length >= 3 || isMcqAnswerKeyRow(text)) {
+      lastKeyRow = row.yNorm;
+      keyRows++;
+    } else if (keyRows && row.yNorm - lastKeyRow > 0.07) {
+      break;
+    }
+  }
+  // Never suppress material just because the words 'Suggested Ans' appear.
+  // Require a recognisable answer table below that heading.
+  return keyRows >= 2 ? lastKeyRow + 0.012 : null;
+}
+
+function parseMajorQuestionNumber(text, isSolution) {
+  const cleaned = normalizePrintedMarkerText(text);
+  // Require a positive question number and a real delimiter; '0.40' and
+  // '11. C' in a key should never become question markers.
+  const match = cleaned.match(/^(?:Q\s*)?([1-9]\d?)(?=\s|\(|[.)](?!\d)|[a-h](?:[ivxlcdm]+)?\b)/i);
+  if (!match) return null;
+  // Standalone answer-key cells, e.g. 16. D or 2 A, are not question prose.
+  if (/^(?:Q\s*)?\d{1,2}\s*[.):]?\s*[A-D]\s*$/i.test(cleaned)) return null;
+  if (!isSolution && /^(?:Q\s*)?\d{1,2}[a-h]/i.test(cleaned)) return null;
+  return Number(match[1]);
+}
+
 function authoritativeQuestionSegments(question) {
   const segments = (question?.segments || []).filter((segment) => segment.isPart !== false);
   return segments.filter((segment) => {
@@ -1118,18 +1157,18 @@ function App() {
     for (const pageData of pages) {
       const top = headerPct / 100;
       const bottom = 1 - footerPct / 100;
+      const answerKeyBottom = workflowKind === 'solutions' ? answerKeyBottomOnPage(pageData.rows) : null;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom || row.xNorm > 0.19) continue;
+        if (answerKeyBottom != null && row.yNorm <= answerKeyBottom) continue;
         if (workflowKind === 'solutions' && isMcqAnswerKeyRow(row.text)) continue;
-        const match = workflowKind === 'solutions'
-          ? row.text.match(/^(?:Q\s*)?(\d{1,2})(?=\s|\(|[.)]|[a-h](?:[ivxlcdm]+)?\b)/i)
-          : row.text.match(/^(?:Q\s*)?(\d{1,2})(?=\s|\(|[.)])/i);
-        if (!match) continue;
+        const number = parseMajorQuestionNumber(row.text, workflowKind === 'solutions');
+        if (number == null) continue;
         starts.push({
           page: pageData.pageNumber,
           y: round4(Math.max(top + 0.004, row.yNorm - 0.014)),
-          label: `Q${match[1]}`,
-          number: Number(match[1]),
+          label: `Q${number}`,
+          number,
         });
       }
     }
