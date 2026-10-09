@@ -2865,6 +2865,8 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   const [individualTrimMode, setIndividualTrimMode] = useState(false);
   const [selectedBreakIndex, setSelectedBreakIndex] = useState(null);
   const [breakWarning, setBreakWarning] = useState('');
+  // Automatic suggestions are preview-only; never persist them as manual breaks.
+  const [paginationMode, setPaginationMode] = useState('original');
 
   useEffect(() => {
     function onKeyDown(event) {
@@ -2882,6 +2884,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   useEffect(() => {
     setSelectedBreakIndex(null);
     setBreakWarning('');
+    setPaginationMode('original');
   }, [region?.id]);
 
   useEffect(() => {
@@ -2900,7 +2903,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
         : automaticBreaks(compacted.canvas.width, compacted.canvas.height, compactedParts.length ? compactedParts : mapPartsToCompactedStrip(result.navigationFractions || [], compacted));
       const nextAuto = compactedAuto.map(compacted.compactedToOriginal);
       setAutoBreaks(nextAuto);
-      if ((!savedBreaks || !savedBreaks.length)) onBreaksChange(nextAuto);
+      // Do not overwrite the stored teacher breaks with automatic suggestions.
       setLoading(false);
     }).catch((error) => { console.error(error); if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -2911,36 +2914,36 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
 
   const compacted = buildCompactedStrip(strip.canvas, savedExclusions);
   const compactedParts = mapPartsToCompactedStrip(strip.partFractions, compacted);
-  // Saved break coordinates refer to the original strip. A break swallowed by
-  // an excluded band is no longer a meaningful page boundary: omit it, while
-  // preserving the other teacher-selected breaks in compacted coordinates.
-  const requestedCompactedBreaks = (savedBreaks || [])
-    .filter((fraction) => !compacted.exclusions.some((range) => fraction >= range.start && fraction <= range.end))
-    .map((fraction) => compacted.originalToCompacted(fraction));
-  // In whole-question mode, retain detected part positions solely for safe
-  // pagination. They do not become exported subpart crops.
   const paginationParts = compactedParts.length
     ? compactedParts
     : mapPartsToCompactedStrip(strip.navigationFractions || [], compacted);
-  // With no exclusions or teacher breaks, retain the source PDF's page joins.
-  // This avoids redistributing a neatly laid-out original page or slicing a
-  // question part solely because whole-question mode hides part markers.
-  const originalLayoutBreaks = !savedExclusions.length && !requestedCompactedBreaks.length
-    ? (strip.sourcePageBreakFractions || []) : [];
-  const publicationBreaks = originalLayoutBreaks.length ? originalLayoutBreaks : keepCompletePartsAtPageBreaks(
-    compacted.canvas.width,
-    compacted.canvas.height,
-    paginationParts,
-    requestedCompactedBreaks,
-  );
+  // Source page joins take priority in original-layout mode. Convert their
+  // original coordinates only after excluded regions have been removed.
+  const originalPageJoins = (strip.sourcePageBreakFractions || [])
+    .filter((fraction) => !compacted.exclusions.some((range) => fraction > range.start && fraction < range.end))
+    .map((fraction) => compacted.originalToCompacted(fraction));
+  const teacherBreaks = (savedBreaks || [])
+    .filter((fraction) => !compacted.exclusions.some((range) => fraction > range.start && fraction < range.end))
+    .map((fraction) => compacted.originalToCompacted(fraction));
+  const preferredBreaks = paginationMode === 'manual'
+    ? teacherBreaks
+    : paginationMode === 'compact'
+      ? automaticBreaks(compacted.canvas.width, compacted.canvas.height, paginationParts)
+      : originalPageJoins;
   const compactedBreaks = normalizeBreaksForPageCapacity(
     compacted.canvas.width,
     compacted.canvas.height,
     paginationParts,
-    publicationBreaks,
+    paginationMode === 'manual' ? preferredBreaks : keepCompletePartsAtPageBreaks(
+      compacted.canvas.width, compacted.canvas.height, paginationParts, preferredBreaks,
+    ),
   );
+  function saveTeacherBreaks(nextBreaks) {
+    setPaginationMode('manual');
+    onBreaksChange(nextBreaks);
+  }
   const effectiveOriginalBreaks = compactedBreaks.map(compacted.compactedToOriginal);
-  const manualBreakInsidePart = (savedBreaks || []).map((fraction) => {
+  const manualBreakInsidePart = (paginationMode === 'manual' ? savedBreaks || [] : []).map((fraction) => {
     const starts = [0, ...strip.partFractions.map((part) => part.fraction).sort((a, b) => a - b), 1];
     const nearest = starts.reduce((best, start) => Math.min(best, Math.abs(start - fraction)), 1);
     if (nearest <= 0.004) return null;
@@ -2954,13 +2957,13 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   function moveSelectedBreak(direction) {
     const result = moveBreakToAdjacentPart(strip, effectiveOriginalBreaks, savedExclusions, selectedBreakIndex, direction);
     setBreakWarning(result.warning || '');
-    if (result.moved) onBreaksChange(result.breaks);
+    if (result.moved) saveTeacherBreaks(result.breaks);
   }
 
   function removeSelectedBreak() {
     if (selectedBreakIndex == null || selectedBreakIndex < 0 || selectedBreakIndex >= effectiveOriginalBreaks.length) return;
     const remaining = effectiveOriginalBreaks.filter((_, index) => index !== selectedBreakIndex);
-    onBreaksChange(remaining);
+    saveTeacherBreaks(remaining);
     setSelectedBreakIndex(null);
     setBreakWarning('');
     setAddBreakMode(false);
@@ -3027,13 +3030,18 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
           <p>Use ← / → to review questions. Click a purple break, then use ↑ / ↓ to jump between detected parts or source-page boundaries (even in whole-question mode); drag for fine positioning.</p>
         </div>
         <div className="preview-actions">
+          <div role="group" aria-label="Page layout mode" style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button type="button" className={`ghost compact ${paginationMode === 'original' ? 'active-tool' : ''}`} aria-pressed={paginationMode === 'original'} onClick={() => { setPaginationMode('original'); setSelectedBreakIndex(null); }}>Original pages</button>
+            <button type="button" className={`ghost compact ${paginationMode === 'compact' ? 'active-tool' : ''}`} aria-pressed={paginationMode === 'compact'} onClick={() => { setPaginationMode('compact'); setSelectedBreakIndex(null); }}>Compact pages</button>
+            <button type="button" className={`ghost compact ${paginationMode === 'manual' ? 'active-tool' : ''}`} aria-pressed={paginationMode === 'manual'} onClick={() => { onBreaksChange(effectiveOriginalBreaks); setPaginationMode('manual'); }}>Custom breaks</button>
+          </div>
           <button className={`ghost compact ${excludeMode ? 'active-tool' : ''}`} onClick={() => { setExcludeMode((value) => !value); setAddBreakMode(false); }}>Remove blank space <kbd>X</kbd></button>
           <button className="ghost compact" onClick={() => setShowExcludeHelp((value) => !value)} aria-expanded={showExcludeHelp}>{showExcludeHelp ? 'Hide removal help' : 'How to remove space'}</button>
           <button className={`ghost compact ${addBreakMode ? 'active-tool' : ''}`} onClick={() => { setAddBreakMode((value) => !value); setExcludeMode(false); }}>{addBreakMode ? 'Click crop to place break' : '+ Add page break'}</button>
           {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(-1)} title="Move selected page break to the previous part boundary">↑ Previous boundary</button>}
           {selectedBreakIndex != null && <button className="ghost compact" type="button" onClick={() => moveSelectedBreak(1)} title="Move selected page break to the next part boundary">↓ Next boundary</button>}
           {selectedBreakIndex != null && selectedBreakIndex < effectiveOriginalBreaks.length && <button className="ghost compact" type="button" onClick={removeSelectedBreak} title="Delete the selected purple page break">Remove selected break</button>}
-          <button className="ghost compact" onClick={() => { onBreaksChange(autoBreaks); setAddBreakMode(false); setSelectedBreakIndex(null); setBreakWarning(''); }}>Reset smart breaks</button>
+          <button className="ghost compact" onClick={() => { setPaginationMode('compact'); setAddBreakMode(false); setSelectedBreakIndex(null); setBreakWarning(''); }}>Reset smart breaks</button>
         </div>
       </div>
 
@@ -3086,7 +3094,7 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       <div className="preview-grid independent-scroll-grid" key={region.id}>
         <div className="layout-editor-panel" aria-label="Crop editor scroll area" tabIndex={0}>
           <div className="panel-heading compact-panel-heading"><div><h3>Edit crop</h3><p>{excludeMode ? 'Drag across blank space; double-click a removed band to restore it.' : addBreakMode ? 'Click where the new page should end; it will snap to a nearby part boundary.' : 'Purple = page breaks · Blue = part starts'}</p></div><span className="panel-note">{savedExclusions.length} excluded from output</span></div>
-          <StripBreakEditor strip={strip} breaks={effectiveOriginalBreaks} onBreaksChange={onBreaksChange} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} addBreakMode={addBreakMode} onAddBreakComplete={() => setAddBreakMode(false)} selectedBreakIndex={selectedBreakIndex} onSelectBreak={setSelectedBreakIndex} onBreakWarning={setBreakWarning} />
+          <StripBreakEditor strip={strip} breaks={effectiveOriginalBreaks} onBreaksChange={saveTeacherBreaks} exclusions={savedExclusions} onExclusionsChange={handleExclusionsChange} excludeMode={excludeMode} addBreakMode={addBreakMode} onAddBreakComplete={() => setAddBreakMode(false)} selectedBreakIndex={selectedBreakIndex} onSelectBreak={setSelectedBreakIndex} onBreakWarning={setBreakWarning} />
         </div>
         <div className="final-pages-panel" aria-label="Output preview scroll area" tabIndex={0}>
           <div className="panel-heading compact-panel-heading"><div><h3>Output preview</h3><p>{finalPages.length} A4 page{finalPages.length === 1 ? '' : 's'}</p></div></div>
