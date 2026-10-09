@@ -2444,7 +2444,8 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
   }
 
   if (!fragments.length) return null;
-  const width = Math.max(...fragments.map((fragment) => fragment.width));
+  const width = Math.max(...fragments.map(({ canvas }) => canvas.width));
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(cumulativeHeight) || cumulativeHeight <= 0) return null;
   const strip = document.createElement('canvas');
   strip.width = width; strip.height = cumulativeHeight;
   const ctx = strip.getContext('2d');
