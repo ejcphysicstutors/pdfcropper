@@ -1043,7 +1043,8 @@ function App() {
   }
 
   function safeY(yNorm) {
-    return round4(clamp(yNorm, headerPct / 100 + 0.004, 1 - footerPct / 100 - 0.004));
+    const { top, bottom } = effectivePageCropBounds(headerPct, footerPct, globalReviewTrim);
+    return round4(clamp(yNorm, top + 0.004, bottom - 0.004));
   }
 
   function addLine(page, y, kind = lineMode) {
@@ -2073,8 +2074,8 @@ function App() {
                     <span className="summary-action">Edit</span>
                   </summary>
                   <div className="details-body">
-                    <label>Header removed <strong>{headerPct}%</strong><input type="range" min="0" max="15" step="0.5" value={headerPct} onChange={(e) => setHeaderPct(Number(e.target.value))} /></label>
-                    <label>Footer removed <strong>{footerPct}%</strong><input type="range" min="0" max="15" step="0.5" value={footerPct} onChange={(e) => setFooterPct(Number(e.target.value))} /></label>
+                    <label>Header crop <strong>{headerPct}%</strong><input type="range" min="0" max="15" step="0.5" value={headerPct} onChange={(e) => setHeaderPct(Number(e.target.value))} /></label>
+                    <label>Footer crop <strong>{footerPct}%</strong><input type="range" min="0" max="15" step="0.5" value={footerPct} onChange={(e) => setFooterPct(Number(e.target.value))} /></label>
                     <label className="check-row"><input type="checkbox" checked={showGuides} onChange={(e) => setShowGuides(e.target.checked)} />Show removed regions</label>
                   </div>
                 </details>
@@ -2246,7 +2247,7 @@ function App() {
               {selectedLine && <div className="selected-line-bar"><strong>Selected: {selectedLine.kind === START ? 'START' : selectedLine.kind === END ? 'END' : 'PART'}{selectedLineOwner ? ` · ${selectedLineOwner.label}` : ''}</strong><span>↑ / ↓ move · Shift = larger move · Delete removes</span></div>}
               <div className="rolling-paper">
                 {pages.map((pageData) => (
-                  <PdfPage key={pageData.pageNumber} pageData={pageData} headerPct={headerPct} footerPct={footerPct}
+                  <PdfPage key={pageData.pageNumber} pageData={pageData} headerPct={headerPct} footerPct={footerPct} globalReviewTrim={globalReviewTrim} pageTrim={trimOverrides[pageData.pageNumber] || {}}
                     lines={activeLines.filter((line) => line.page === pageData.pageNumber && !(line.kind === END && regions.some((region) => region.linked && region.start.page <= line.page && comparePos(line, region.start) > 0 && comparePos(line, region.end) < 0)))} lineMode={heldLineMode || lineMode} onAddLine={addLine}
                     onMoveLine={moveLine} onRemoveLine={removeLine} showGuides={showGuides} regions={regions} selectedLineId={selectedLineId} onSelectLine={setSelectedLineId}
                     selectedQuestionId={selectedQuestionId} selectedSegmentId={selectedSegmentId} onSelectSegment={selectSegmentForEditing} />
@@ -2281,7 +2282,7 @@ function App() {
   );
 }
 
-function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, onMoveLine, onRemoveLine, showGuides, regions, selectedLineId, onSelectLine, selectedQuestionId, selectedSegmentId, onSelectSegment }) {
+function PdfPage({ pageData, headerPct, footerPct, globalReviewTrim = {}, pageTrim = {}, lines, lineMode, onAddLine, onMoveLine, onRemoveLine, showGuides, regions, selectedLineId, onSelectLine, selectedQuestionId, selectedSegmentId, onSelectSegment }) {
   const canvasRef = useRef(null);
   const frameRef = useRef(null);
   const [renderSize, setRenderSize] = useState({ width: pageData.viewport.width, height: pageData.viewport.height });
@@ -2307,8 +2308,8 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
     return () => { cancelled = true; renderTask?.cancel(); };
   }, [pageData]);
 
-  const visibleTop = headerPct / 100;
-  const visibleBottom = 1 - footerPct / 100;
+  // Match the exact crop coordinates used by buildQuestionStrip in Page Review.
+  const { top: visibleTop, bottom: visibleBottom } = effectivePageCropBounds(headerPct, footerPct, globalReviewTrim, pageTrim);
   const visibleHeight = visibleBottom - visibleTop;
   const frameHeight = renderSize.height * visibleHeight;
   const canvasTop = -renderSize.height * visibleTop;
@@ -2347,7 +2348,7 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
       <div className="page-label">Page {pageData.pageNumber}</div>
       <div ref={frameRef} className="page-frame" style={{ width: renderSize.width, height: frameHeight }} onClick={(e) => { if (!e.target.closest('.crop-line')) onAddLine(pageData.pageNumber, eventToYNorm(e), lineMode); }}>
         <canvas ref={canvasRef} style={{ top: canvasTop }} />
-        {showGuides && <><div className="crop-guide top-guide" style={{ height: `${headerPct}%` }}><span>header removed</span></div><div className="crop-guide bottom-guide" style={{ height: `${footerPct}%` }}><span>footer removed</span></div></>}
+        {showGuides && <><div className="crop-cut-edge crop-cut-top"><span>top crop edge</span></div><div className="crop-cut-edge crop-cut-bottom"><span>bottom crop edge</span></div></>}
         {regions.flatMap((region) => (region.segments || []).map((segment) => ({ region, segment }))).filter(({ segment }) => segment.start.page <= pageData.pageNumber && segment.end.page >= pageData.pageNumber).map(({ region, segment }) => {
           const topNorm = segment.start.page === pageData.pageNumber ? Math.max(segment.start.y, visibleTop) : visibleTop;
           const bottomNorm = segment.end.page === pageData.pageNumber ? Math.min(segment.end.y, visibleBottom) : visibleBottom;

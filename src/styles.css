@@ -632,3 +632,12 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
 /* Adaptive whole-question cropping controls */
 .crop-style-control { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; font-weight: 650; }
 .crop-style-control select { width: 100%; max-width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #bfcbdc; border-radius: 9px; background: #fff; color: #243b58; font: inherit; }
+
+/* The frame has already excluded the configured header/footer. Show the
+   actual crop edge, not a second mask that covers retained question text. */
+.crop-cut-edge { position: absolute; left: 0; right: 0; height: 0; z-index: 6; pointer-events: none; border-top: 2px dashed rgba(90,113,145,.65); }
+.crop-cut-top { top: 0; }
+.crop-cut-bottom { bottom: 0; }
+.crop-cut-edge span { position: absolute; right: 6px; font-size: 10px; padding: 1px 5px; border-radius: 3px; background: #61758f; color: white; }
+.crop-cut-top span { top: 3px; }
+.crop-cut-bottom span { bottom: 3px; transform: translateY(-100%); }
