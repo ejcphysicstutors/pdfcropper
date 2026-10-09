@@ -252,45 +252,6 @@ function isMcqAnswerKeyRow(text) {
   return numbers.length >= 3 && options.length >= 3;
 }
 
-// Entire MCQ answer-key tables are not question statements.  PDF text extraction
-// can split a table into several items/rows, so filtering only individual
-// number-and-letter cells is insufficient (DHS 2026 Paper 1 regression).
-function answerKeyBottomOnPage(rows) {
-  const ordered = [...(rows || [])].sort((a, b) => a.yNorm - b.yNorm);
-  const headerIndex = ordered.findIndex((row) => /\b(?:suggested\s+ans(?:wers?)?|answer\s+key)\b/i.test(row.text));
-  if (headerIndex < 0) return null;
-  const headerY = ordered[headerIndex].yNorm;
-  let lastKeyRow = headerY;
-  let keyRows = 0;
-  for (const row of ordered.slice(headerIndex + 1)) {
-    if (row.yNorm - headerY > 0.40) break;
-    const text = normalizePrintedMarkerText(row.text);
-    const pairs = [...text.matchAll(/(?:^|\s)\d{1,2}\s*[.):]?\s*[A-D](?=\s|$|[|])/gi)];
-    // A broad row of number + option pairs is strong evidence of a key table.
-    if (pairs.length >= 3 || isMcqAnswerKeyRow(text)) {
-      lastKeyRow = row.yNorm;
-      keyRows++;
-    } else if (keyRows && row.yNorm - lastKeyRow > 0.07) {
-      break;
-    }
-  }
-  // Never suppress material just because the words 'Suggested Ans' appear.
-  // Require a recognisable answer table below that heading.
-  return keyRows >= 2 ? lastKeyRow + 0.012 : null;
-}
-
-function parseMajorQuestionNumber(text, isSolution) {
-  const cleaned = normalizePrintedMarkerText(text);
-  // Require a positive question number and a real delimiter; '0.40' and
-  // '11. C' in a key should never become question markers.
-  const match = cleaned.match(/^(?:Q\s*)?([1-9]\d?)(?=\s|\(|[.)](?!\d)|[a-h](?:[ivxlcdm]+)?\b)/i);
-  if (!match) return null;
-  // Standalone answer-key cells, e.g. 16. D or 2 A, are not question prose.
-  if (/^(?:Q\s*)?\d{1,2}\s*[.):]?\s*[A-D]\s*$/i.test(cleaned)) return null;
-  if (!isSolution && /^(?:Q\s*)?\d{1,2}[a-h]/i.test(cleaned)) return null;
-  return Number(match[1]);
-}
-
 function authoritativeQuestionSegments(question) {
   const segments = (question?.segments || []).filter((segment) => segment.isPart !== false);
   return segments.filter((segment) => {
@@ -1157,18 +1118,18 @@ function App() {
     for (const pageData of pages) {
       const top = headerPct / 100;
       const bottom = 1 - footerPct / 100;
-      const answerKeyBottom = workflowKind === 'solutions' ? answerKeyBottomOnPage(pageData.rows) : null;
       for (const row of pageData.rows || []) {
         if (row.yNorm <= top || row.yNorm >= bottom || row.xNorm > 0.19) continue;
-        if (answerKeyBottom != null && row.yNorm <= answerKeyBottom) continue;
         if (workflowKind === 'solutions' && isMcqAnswerKeyRow(row.text)) continue;
-        const number = parseMajorQuestionNumber(row.text, workflowKind === 'solutions');
-        if (number == null) continue;
+        const match = workflowKind === 'solutions'
+          ? row.text.match(/^(?:Q\s*)?(\d{1,2})(?=\s|\(|[.)]|[a-h](?:[ivxlcdm]+)?\b)/i)
+          : row.text.match(/^(?:Q\s*)?(\d{1,2})(?=\s|\(|[.)])/i);
+        if (!match) continue;
         starts.push({
           page: pageData.pageNumber,
           y: round4(Math.max(top + 0.004, row.yNorm - 0.014)),
-          label: `Q${number}`,
-          number,
+          label: `Q${match[1]}`,
+          number: Number(match[1]),
         });
       }
     }
@@ -1602,7 +1563,7 @@ function App() {
         appliesTo: isSolution ? 'solutions' : 'questions',
         requiredForQuestionBank: true,
         coordinateSystem: 'fractions of the full cleaned question strip, before exclusions and output page breaks',
-        order: ['crop source question using start/end', 'remove source-page header/footer and review trim', 'remove every excludedOutputRanges band', 'paginate using outputPageBreakFractions'],
+        order: ['crop source question using start/end', 'apply teacher-selected Page Preparation crop bounds and explicit review overrides (no automatic trim)', 'remove every excludedOutputRanges band', 'paginate using outputPageBreakFractions'],
         exclusionPolicy: 'Excluded ranges are not part of the published question or solution and MUST NOT appear in question-bank crops, previews, exports or searchable extracted content.',
       },
       questions: regions.map((region, index) => ({
@@ -2415,42 +2376,15 @@ function PdfPage({ pageData, headerPct, footerPct, lines, lineMode, onAddLine, o
   );
 }
 
-function detectedHeaderCutoff(pageData, configuredTop) {
-  // The crop-review preview must not reintroduce a printed page number that
-  // was already hidden by the paper editor's nominal header crop. Some papers
-  // position this number just below the default 3% trim.
-  const headerNumbers = (pageData.rows || []).filter((row) => {
-    const text = String(row.text || '').trim();
-    const x = Number(row.xNorm);
-    const y = Number(row.yNorm);
-    return /^\d{1,3}$/.test(text) && Number.isFinite(x) && Number.isFinite(y)
-      && x >= 0.32 && x <= 0.68 && y >= configuredTop - 0.015 && y < 0.09;
-  });
-  if (!headerNumbers.length) return configuredTop;
-  // Only expand the crop to include printed page furniture. Do not discard
-  // the first line of a part on pages where its crop starts below the number.
-  return Math.min(0.12, Math.max(configuredTop, ...headerNumbers.map((row) => Number(row.yNorm) + 0.012)));
-}
-
-function detectedFooterCutoff(pageData, configuredBottom) {
-  // Do not infer a footer from a bare number in the lower portion of a page.
-  // In worked Physics solutions, equations routinely contain small standalone
-  // numbers, and an incorrect match silently removes the FINAL answer lines.
-  // Printed page numbers are handled by detectedHeaderCutoff instead.
-  // Only recognise explicit footer furniture in the physical footer zone.
-  const footerRows = (pageData.rows || []).filter((row) => {
-    const y = Number(row.yNorm);
-    if (!Number.isFinite(y) || y < 0.89 || y > 0.995) return false;
-    const text = String(row.text || '').replace(/\s+/g, ' ').trim();
-    return /turn\s+over/i.test(text)
-      || /\b\d{4}\s*\/\s*0?\d{1,2}\s*\//i.test(text)
-      || (/\b(?:ASRJC|HCI|RI|RJC|VJC|NJC|SAJC|EJC|ACJC|CJC|DHS|TJC|NYJC|YIJC|JPJC)\b/i.test(text) && /\d{4}/.test(text))
-      || /^(?:©|copyright)\b/i.test(text);
-  });
-  if (!footerRows.length) return configuredBottom;
-  const firstFurnitureY = Math.min(...footerRows.map((row) => Number(row.yNorm)));
-  // Do not pull a page's footer crop into substantive answer content.
-  return Math.min(configuredBottom, Math.max(0.885, firstFurnitureY - 0.013));
+// Page Preparation is the only authority for removing source-page headers and
+// footers. Review may apply explicit teacher-requested extra trims, but it must
+// never inspect PDF text to silently change these boundaries.
+function effectivePageCropBounds(headerPct, footerPct, globalReviewTrim = {}, pageTrim = {}) {
+  const topExtra = pageTrim.topExtra ?? globalReviewTrim.topExtra ?? 0;
+  const bottomExtra = pageTrim.bottomExtra ?? globalReviewTrim.bottomExtra ?? 0;
+  const top = clamp((Number(headerPct) || 0) / 100 + (Number(topExtra) || 0), 0, 0.48);
+  const bottom = clamp(1 - (Number(footerPct) || 0) / 100 - (Number(bottomExtra) || 0), 0.52, 1);
+  return { top, bottom };
 }
 
 async function buildQuestionStrip(pages, region, headerPct, footerPct, globalReviewTrim = {}, trimOverrides = {}) {
@@ -2466,28 +2400,15 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
     await pageData.page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
 
-    const trim = trimOverrides[pageData.pageNumber] || {};
-    const topExtra = trim.topExtra ?? globalReviewTrim.topExtra ?? 0;
-    const bottomExtra = trim.bottomExtra ?? globalReviewTrim.bottomExtra ?? 0;
-
-    // Apply the same base header/footer cleanup used in the rolling-paper editor
-    // before any question-specific or review-only trimming. Keeping this as a
-    // distinct first crop prevents raw page furniture from reappearing in the
-    // layout preview on continuation pages.
-    const cleanTop = detectedHeaderCutoff(pageData, clamp((Number(headerPct) || 0) / 100 + topExtra, 0, 0.48));
-    const configuredBottom = clamp(1 - (Number(footerPct) || 0) / 100 - bottomExtra, 0.52, 1);
-    const cleanBottom = detectedFooterCutoff(pageData, configuredBottom);
+    const { top: cleanTop, bottom: cleanBottom } = effectivePageCropBounds(
+      headerPct, footerPct, globalReviewTrim, trimOverrides[pageData.pageNumber] || {}
+    );
     if (cleanBottom <= cleanTop) continue;
 
-    // PDF.js renders antialiased ink over neighbouring pixels. The preparation
-    // view masks the removed footer, whereas the review re-rasterises the PDF.
-    // Never round the review crop OUTWARDS into the removed region: that can
-    // reintroduce the tops of footer characters (e.g. DHS 2026).
-    // A tiny inward guard is measured in rendered pixels, not percent, so it
-    // cannot remove a meaningful line of solution working.
-    const edgeGuardPx = Math.max(2, Math.min(4, Math.round(renderScale * 2)));
+    // Inward pixel rounding is only numerical rasterization, not an additional
+    // automatic text-sensitive crop. No hidden header/footer guard pixels.
     const cleanSy = Math.ceil(canvas.height * cleanTop);
-    const cleanEy = Math.max(cleanSy + 1, Math.floor(canvas.height * cleanBottom) - edgeGuardPx);
+    const cleanEy = Math.max(cleanSy + 1, Math.floor(canvas.height * cleanBottom));
     const cleanHeight = Math.max(1, cleanEy - cleanSy);
     const cleanedPage = document.createElement('canvas');
     cleanedPage.width = canvas.width;
@@ -2510,8 +2431,15 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     const frag = document.createElement('canvas');
     frag.width = cleanedPage.width; frag.height = sh;
     frag.getContext('2d').drawImage(cleanedPage, 0, sy, cleanedPage.width, sh, 0, 0, cleanedPage.width, sh);
-    fragments.push(frag);
-    pageMaps.push({ page: pageData.pageNumber, top, bottom, startsAtCleanTop: Math.abs(top - cleanTop) < 0.002, startY: cumulativeHeight, height: sh, fullHeight: canvas.height });
+    // Keep a small white gutter at each original-PDF page join. Without it,
+    // the purple page-end control sits directly over the first text line of
+    // the next source page (notably Q7(b) in ASRJC H1 P2). The gutter is
+    // rendered content, so editor and output use identical coordinates.
+    const joinGutter = fragments.length ? 12 : 0;
+    const joinY = cumulativeHeight;
+    cumulativeHeight += joinGutter;
+    fragments.push({ canvas: frag, joinGutter });
+    pageMaps.push({ page: pageData.pageNumber, top, bottom, startsAtCleanTop: Math.abs(top - cleanTop) < 0.002, startY: cumulativeHeight, joinY, height: sh, fullHeight: canvas.height });
     cumulativeHeight += sh;
   }
 
@@ -2522,7 +2450,8 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
   const ctx = strip.getContext('2d');
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, strip.width, strip.height);
   let y = 0;
-  for (const frag of fragments) {
+  for (const { canvas: frag, joinGutter } of fragments) {
+    y += joinGutter; // white gutter is already filled by the background
     ctx.drawImage(frag, 0, y);
     y += frag.height;
   }
@@ -2542,8 +2471,8 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     return { label: part.label, fraction: round4((map.startY + local * map.height) / strip.height) };
   }).filter(Boolean);
   // Page joins are useful intermediate snap targets for long questions.
-  for (const map of pageMaps.slice(1)) navigationFractions.push({ label: `Page ${map.page} start`, fraction: round4(map.startY / strip.height) });
-  const sourcePageBreakFractions = pageMaps.slice(1).filter((map) => map.startsAtCleanTop).map((map) => round4(map.startY / strip.height));
+  for (const map of pageMaps.slice(1)) navigationFractions.push({ label: `Page ${map.page} start`, fraction: round4(map.joinY / strip.height) });
+  const sourcePageBreakFractions = pageMaps.slice(1).filter((map) => map.startsAtCleanTop).map((map) => round4(map.joinY / strip.height));
   return { dataUrl: strip.toDataURL('image/jpeg', 0.94), canvas: strip, width: strip.width, height: strip.height, partFractions, navigationFractions, sourcePageBreakFractions };
 }
 
