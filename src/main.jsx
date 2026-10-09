@@ -710,10 +710,8 @@ function App() {
       if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && selectedLineId) {
         const direction = event.key === 'ArrowUp' ? -1 : 1;
         const step = event.shiftKey ? 0.005 : 0.001;
-        const top = headerPct / 100 + 0.004;
-        const bottom = 1 - footerPct / 100 - 0.004;
         setLines((current) => current.map((line) => line.id === selectedLineId
-          ? { ...line, y: round4(clamp(line.y + direction * step, top, bottom)), source: 'manual' }
+          ? { ...line, y: safeY(line.y + direction * step, line.page), source: 'manual' }
           : line).sort(comparePos));
         setLastSuggestionIds((ids) => ids.filter((item) => item !== selectedLineId));
         setStatus(`Selected line moved ${event.key === 'ArrowUp' ? 'up' : 'down'} ${event.shiftKey ? '5' : '1'} fine step${event.shiftKey ? 's' : ''}.`);
@@ -1248,21 +1246,44 @@ function App() {
     setStatus(`Loaded the PDF as the solution and will reconcile it against ${count} parent questions.`);
   }
 
-  function safeY(yNorm) {
-    const { top, bottom } = effectivePageCropBounds(headerPct, footerPct, globalReviewTrim);
-    return round4(clamp(yNorm, top + 0.004, bottom - 0.004));
+  // Boundary coordinates are in the original PDF coordinate system. Always
+  // move them into the actual retained area for their own source page.
+  function safeY(yNorm, pageNumber) {
+    const { top, bottom } = effectivePageCropBounds(
+      headerPct, footerPct, globalReviewTrim, trimOverrides[pageNumber] || {}
+    );
+    const pad = Math.min(0.006, Math.max(0, (bottom - top) / 4));
+    return round4(clamp(yNorm, top + pad, bottom - pad));
   }
+
+  // Trimming is authoritative. When a teacher changes Page Preparation,
+  // relocate only markers outside the newly retained area. This keeps the
+  // draggable marker and its actual exported crop boundary in sync.
+  useEffect(() => {
+    if (!pages.length) return;
+    setLines((current) => {
+      let changed = false;
+      const next = current.map((line) => {
+        if (!Number.isInteger(line.page) || line.page < 1 || line.page > pages.length) return line;
+        const y = safeY(line.y, line.page);
+        if (Math.abs(y - line.y) < 0.00005) return line;
+        changed = true;
+        return { ...line, y };
+      });
+      return changed ? next.sort(comparePos) : current;
+    });
+  }, [pages.length, headerPct, footerPct, globalReviewTrim.topExtra, globalReviewTrim.bottomExtra, trimOverrides]);
 
   function addLine(page, y, kind = lineMode) {
     if (kind === PART && !detailedQuestionIds.includes(selectedQuestionId)) return;
-    const newLine = { id: makeId(kind), page, y: safeY(y), kind, label: '', manualLabel: false, source: 'manual' };
+    const newLine = { id: makeId(kind), page, y: safeY(y, page), kind, label: '', manualLabel: false, source: 'manual' };
     setLines((current) => [...current, newLine].sort(comparePos));
     setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]);
     setSelectedLineId(newLine.id);
   }
 
   function moveLine(id, page, y) {
-    setLines((current) => current.map((line) => line.id === id ? { ...line, page, y: safeY(y), source: 'manual' } : line).sort(comparePos));
+    setLines((current) => current.map((line) => line.id === id ? { ...line, page, y: safeY(y, page), source: 'manual' } : line).sort(comparePos));
     setSegmentationApproved(false); setSegmentationApprovedAt(null); setApprovalIssues([]);
     setLastSuggestionIds((ids) => ids.filter((item) => item !== id));
   }
@@ -1432,7 +1453,7 @@ function App() {
         : null;
       const authoritativeLabel = authoritativeMatch || start.label;
       candidates.push({ id: makeId(START), page: start.page, y: start.y, kind: START, label: authoritativeLabel, manualLabel: false, source: 'suggested', questionIndex: index });
-      candidates.push({ id: makeId(END), page: end.page, y: safeY(end.y), kind: END, label: '', manualLabel: false, source: 'suggested', questionIndex: index });
+      candidates.push({ id: makeId(END), page: end.page, y: safeY(end.y, end.page), kind: END, label: '', manualLabel: false, source: 'suggested', questionIndex: index });
 
       const questionPartStarts = rawParts.filter((part) => {
         if (!within(part, start, end) || Math.abs(posKey(part) - posKey(start)) <= 180) return false;
@@ -2571,7 +2592,9 @@ function PdfPage({ pageData, headerPct, footerPct, globalReviewTrim = {}, pageTr
           );
         })}
         {lines.map((line) => {
-          const yVisible = ((line.y - visibleTop) / visibleHeight) * 100;
+          const markerPad = Math.min(0.006, visibleHeight / 4);
+          const displayedY = clamp(line.y, visibleTop + markerPad, visibleBottom - markerPad);
+          const yVisible = ((displayedY - visibleTop) / visibleHeight) * 100;
           return (
             <div key={line.id} data-line-id={line.id} className={`crop-line ${line.kind} ${line.source === 'suggested' ? 'suggested-line' : 'confirmed-line'} ${selectedLineId === line.id ? 'selected-line' : ''}`} style={{ top: `${yVisible}%` }}
               onClick={(e) => { e.stopPropagation(); onSelectLine(line.id); }} onPointerDown={(e) => { onSelectLine(line.id); beginDrag(e, line.id); }}
