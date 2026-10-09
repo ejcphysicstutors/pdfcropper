@@ -2399,7 +2399,7 @@ function detectedFooterCutoff(pageData, configuredBottom) {
   // Only recognise explicit footer furniture in the physical footer zone.
   const footerRows = (pageData.rows || []).filter((row) => {
     const y = Number(row.yNorm);
-    if (!Number.isFinite(y) || y < 0.90 || y >= configuredBottom) return false;
+    if (!Number.isFinite(y) || y < 0.89 || y > 0.995) return false;
     const text = String(row.text || '').replace(/\s+/g, ' ').trim();
     return /turn\s+over/i.test(text)
       || /\b\d{4}\s*\/\s*0?\d{1,2}\s*\//i.test(text)
@@ -2409,7 +2409,7 @@ function detectedFooterCutoff(pageData, configuredBottom) {
   if (!footerRows.length) return configuredBottom;
   const firstFurnitureY = Math.min(...footerRows.map((row) => Number(row.yNorm)));
   // Do not pull a page's footer crop into substantive answer content.
-  return Math.min(configuredBottom, Math.max(0.90, firstFurnitureY - 0.006));
+  return Math.min(configuredBottom, Math.max(0.885, firstFurnitureY - 0.013));
 }
 
 async function buildQuestionStrip(pages, region, headerPct, footerPct, globalReviewTrim = {}, trimOverrides = {}) {
@@ -2470,7 +2470,7 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     frag.width = cleanedPage.width; frag.height = sh;
     frag.getContext('2d').drawImage(cleanedPage, 0, sy, cleanedPage.width, sh, 0, 0, cleanedPage.width, sh);
     fragments.push(frag);
-    pageMaps.push({ page: pageData.pageNumber, top, bottom, startY: cumulativeHeight, height: sh, fullHeight: canvas.height });
+    pageMaps.push({ page: pageData.pageNumber, top, bottom, startsAtCleanTop: Math.abs(top - cleanTop) < 0.002, startY: cumulativeHeight, height: sh, fullHeight: canvas.height });
     cumulativeHeight += sh;
   }
 
@@ -2502,7 +2502,8 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
   }).filter(Boolean);
   // Page joins are useful intermediate snap targets for long questions.
   for (const map of pageMaps.slice(1)) navigationFractions.push({ label: `Page ${map.page} start`, fraction: round4(map.startY / strip.height) });
-  return { dataUrl: strip.toDataURL('image/jpeg', 0.94), canvas: strip, width: strip.width, height: strip.height, partFractions, navigationFractions };
+  const sourcePageBreakFractions = pageMaps.slice(1).filter((map) => map.startsAtCleanTop).map((map) => round4(map.startY / strip.height));
+  return { dataUrl: strip.toDataURL('image/jpeg', 0.94), canvas: strip, width: strip.width, height: strip.height, partFractions, navigationFractions, sourcePageBreakFractions };
 }
 
 function automaticBreaks(stripWidth, stripHeight, partFractions) {
@@ -2891,7 +2892,10 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
       if (!result) { setLoading(false); return; }
       const compacted = buildCompactedStrip(result.canvas, savedExclusions);
       const compactedParts = mapPartsToCompactedStrip(result.partFractions, compacted);
-      const compactedAuto = automaticBreaks(compacted.canvas.width, compacted.canvas.height, compactedParts);
+      const originalPageBreaks = !savedExclusions.length ? (result.sourcePageBreakFractions || []) : [];
+      const compactedAuto = originalPageBreaks.length
+        ? normalizeBreaksForPageCapacity(compacted.canvas.width, compacted.canvas.height, compactedParts, originalPageBreaks)
+        : automaticBreaks(compacted.canvas.width, compacted.canvas.height, compactedParts.length ? compactedParts : mapPartsToCompactedStrip(result.navigationFractions || [], compacted));
       const nextAuto = compactedAuto.map(compacted.compactedToOriginal);
       setAutoBreaks(nextAuto);
       if ((!savedBreaks || !savedBreaks.length)) onBreaksChange(nextAuto);
@@ -2911,16 +2915,26 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   const requestedCompactedBreaks = (savedBreaks || [])
     .filter((fraction) => !compacted.exclusions.some((range) => fraction >= range.start && fraction <= range.end))
     .map((fraction) => compacted.originalToCompacted(fraction));
-  const publicationBreaks = keepCompletePartsAtPageBreaks(
+  // In whole-question mode, retain detected part positions solely for safe
+  // pagination. They do not become exported subpart crops.
+  const paginationParts = compactedParts.length
+    ? compactedParts
+    : mapPartsToCompactedStrip(strip.navigationFractions || [], compacted);
+  // With no exclusions or teacher breaks, retain the source PDF's page joins.
+  // This avoids redistributing a neatly laid-out original page or slicing a
+  // question part solely because whole-question mode hides part markers.
+  const originalLayoutBreaks = !savedExclusions.length && !requestedCompactedBreaks.length
+    ? (strip.sourcePageBreakFractions || []) : [];
+  const publicationBreaks = originalLayoutBreaks.length ? originalLayoutBreaks : keepCompletePartsAtPageBreaks(
     compacted.canvas.width,
     compacted.canvas.height,
-    compactedParts,
+    paginationParts,
     requestedCompactedBreaks,
   );
   const compactedBreaks = normalizeBreaksForPageCapacity(
     compacted.canvas.width,
     compacted.canvas.height,
-    compactedParts,
+    paginationParts,
     publicationBreaks,
   );
   const effectiveOriginalBreaks = compactedBreaks.map(compacted.compactedToOriginal);
