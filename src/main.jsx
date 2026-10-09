@@ -303,6 +303,133 @@ class AppErrorBoundary extends React.Component {
   }
 }
 
+// Optional layout for independently numbered answers in two-column tables.
+// Coordinates refer to the ORIGINAL PDF page, so downstream importers must
+// crop all four sides of each rectangle rather than using full-width strips.
+function detectGridAnswerCells(pages) {
+  const cells = [];
+  for (const pd of pages) {
+    const candidates = (pd.textContent?.items || []).map((item) => {
+      const text = String(item.str || '').trim();
+      const m = text.match(/^(\d{1,2})\s*[.)](?:\s*[A-D])?(?:\s|$)/i);
+      if (!m) return null;
+      const pos = textItemPosition(item, pd.viewport);
+      const col = pos.xNorm >= 0.46 && pos.xNorm < 0.60 ? 1 : pos.xNorm >= 0.005 && pos.xNorm < 0.25 ? 0 : -1;
+      // Answer summaries normally occupy the very top and have more columns.
+      if (col < 0 || pos.yNorm < 0.07 || pos.yNorm > 0.95) return null;
+      return { number: Number(m[1]), col, y: pos.yNorm, page: pd.pageNumber };
+    }).filter(Boolean);
+    const paired = [];
+    for (const left of candidates.filter((c) => c.col === 0)) {
+      const right = candidates.find((c) => c.col === 1 && c.number === left.number + 1 && Math.abs(c.y - left.y) < 0.035);
+      if (right) paired.push({ left, right, y: Math.min(left.y, right.y) });
+    }
+    paired.sort((a, b) => a.y - b.y);
+    // A page with just one coincidental number pair is not a grid page.
+    if (paired.length < 2) continue;
+    const unique = paired.filter((row, i) => i === 0 || row.left.number > paired[i - 1].left.number);
+    for (let i = 0; i < unique.length; i += 1) {
+      const row = unique[i];
+      const next = unique[i + 1];
+      const top = clamp(row.y - 0.02, 0.02, 0.97);
+      const lastContent = (pd.textContent?.items || []).map((item) => ({
+        text: String(item.str || '').trim(), pos: textItemPosition(item, pd.viewport),
+      })).filter((entry) => entry.pos.yNorm > row.y && entry.pos.yNorm < 0.98 && entry.pos.xNorm > 0.08 && entry.pos.xNorm < 0.95);
+      const finalBottom = Math.min(0.985, Math.max(row.y + 0.05, ...lastContent.map((entry) => entry.pos.yNorm + 0.025)));
+      const bottom = next ? clamp(next.y - 0.02, top + 0.025, 0.985) : finalBottom;
+      for (const part of [row.left, row.right]) {
+        cells.push({ label: `Q${part.number}`, number: part.number, page: pd.pageNumber,
+          x0: part.col ? 0.5 : 0.012, x1: part.col ? 0.985 : 0.5,
+          y0: round4(top), y1: round4(bottom), detected: true });
+      }
+    }
+  }
+  const unique = [...new Map(cells.map((c) => [c.number, c])).values()].sort((a, b) => a.number - b.number);
+  // Require substantial evidence, contiguous pairs and a credible numbering run.
+  if (unique.length < 8 || unique.filter((c) => c.number <= 8).length < 6) return [];
+  return unique;
+}
+
+function GridCellImage({ pageData, cell }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    let cancelled = false;
+    let task;
+    async function draw() {
+      if (!pageData || !ref.current || !(cell.x1 > cell.x0 && cell.y1 > cell.y0)) return;
+      const full = document.createElement('canvas');
+      full.width = Math.ceil(pageData.viewport.width);
+      full.height = Math.ceil(pageData.viewport.height);
+      task = pageData.page.render({ canvasContext: full.getContext('2d'), viewport: pageData.viewport });
+      await task.promise;
+      if (cancelled || !ref.current) return;
+      const x = Math.floor(cell.x0 * full.width), y = Math.floor(cell.y0 * full.height);
+      const w = Math.max(1, Math.ceil(cell.x1 * full.width) - x);
+      const h = Math.max(1, Math.ceil(cell.y1 * full.height) - y);
+      const dest = ref.current;
+      dest.width = w;
+      dest.height = h;
+      dest.getContext('2d').drawImage(full, x, y, w, h, 0, 0, w, h);
+    }
+    draw().catch((e) => { if (!cancelled && e.name !== 'RenderingCancelledException') console.error(e); });
+    return () => { cancelled = true; if (task) task.cancel(); };
+  }, [pageData, cell.x0, cell.x1, cell.y0, cell.y1]);
+  return <canvas ref={ref} style={{ width: '100%', height: 'auto', display: 'block' }} />;
+}
+
+function GridSolutionsWorkspace({ pages, cells, setCells, sourceName, onExit }) {
+  const [selected, setSelected] = useState(0);
+  const cell = cells[selected];
+  const pageData = pages.find((p) => p.pageNumber === cell?.page);
+  function update(field, value) {
+    setCells((current) => current.map((entry, i) => i !== selected ? entry : { ...entry, [field]: round4(value), detected: false }));
+  }
+  function save() {
+    const questions = cells.map((entry) => ({
+      questionRef: entry.label, label: entry.label,
+      start: { page: entry.page, yFractionFromTop: entry.y0 },
+      end: { page: entry.page, yFractionFromTop: entry.y1, explicit: true },
+      rectangularCrop: { coordinateSystem: 'normalized original PDF page', page: entry.page,
+        leftFraction: entry.x0, rightFraction: entry.x1, topFraction: entry.y0, bottomFraction: entry.y1 },
+      parts: [], segments: [], outputPageBreakFractions: [], excludedOutputRanges: [],
+      outputCrop: { version: 2, shape: 'rectangle', includeExcludedContentInQuestionBank: false,
+        rectangle: { page: entry.page, leftFraction: entry.x0, rightFraction: entry.x1,
+          topFraction: entry.y0, bottomFraction: entry.y1 } },
+    }));
+    const payload = { schemaVersion: 2, documentType: 'solution-segmentation',
+      cropLayout: 'two-column-grid', sourceFile: sourceName, createdAt: new Date().toISOString(),
+      pageCount: pages.length,
+      cropInstructions: { requiredForQuestionBank: true,
+        method: 'Crop each rectangularCrop region from the original PDF page, using all four normalized coordinates. Do NOT use full-width start/end strips.',
+        coordinateSystem: 'normalized coordinates of each full PDF page',
+        order: ['render original PDF page', 'crop rectangularCrop (all four edges)', 'associate result with questionRef'], },
+      questions, segmentationApproval: { approved: true, structuralIssueCount: 0 }, };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${sourceName.replace(/\.pdf$/i, '')}.solutions.json`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  if (!cell) return <div className="loading-card">No grid cells detected. Return to whole-question cropping.</div>;
+  return <div className="grid-solutions-workspace">
+    <div className="grid-solutions-heading"><div><h2>Two-column solution grid</h2><p>Each cell is a separate answer. Adjust any cropped edge before exporting.</p></div><div className="grid-actions"><button className="ghost" onClick={onExit}>← Standard cropping</button><button className="primary" onClick={save}>Download grid solutions JSON</button></div></div>
+    <div className="grid-solutions-body">
+      <aside className="grid-cell-list">{cells.map((item, i) => <button key={`${item.page}-${item.number}`} className={i === selected ? 'grid-cell-selected' : ''} onClick={() => setSelected(i)}>{item.label} <small>page {item.page}</small></button>)}</aside>
+      <div className="grid-cell-editor"><h3>{cell.label} · source page {cell.page}</h3>
+        <div className="grid-edit-controls">
+          {[["Left", "x0", 0, cell.x1 - 0.05], ["Right", "x1", cell.x0 + 0.05, 1], ["Top", "y0", 0, cell.y1 - 0.02], ["Bottom", "y1", cell.y0 + 0.02, 1]].map(([label, field, min, max]) =>
+            <label key={field}>{label} <input type="range" min={min} max={max} step="0.001" value={cell[field]} onChange={(event) => update(field, Number(event.target.value))} /><span>{Math.round(cell[field] * 100)}%</span></label>
+          )}
+        </div>
+        <div className="grid-cell-preview"><GridCellImage pageData={pageData} cell={cell} /></div>
+        <p className="panel-note">Check especially the bottom of each row and diagrams near the centre divider. These crop coordinates are saved independently for every answer.</p>
+      </div>
+    </div>
+  </div>;
+}
+
 function App() {
   const [file, setFile] = useState(null);
   const [pdf, setPdf] = useState(null);
@@ -325,6 +452,7 @@ function App() {
   // Whole-question crops are the default; subpart boundaries remain available on demand.
   const [detailedQuestionIds, setDetailedQuestionIds] = useState([]);
   const [cropStyle, setCropStyle] = useState('auto');
+  const [gridCells, setGridCells] = useState([]);
   const [cropStyleOverrides, setCropStyleOverrides] = useState({});
   const [outputBreaks, setOutputBreaks] = useState({});
   const [exclusions, setExclusions] = useState({});
@@ -359,8 +487,8 @@ function App() {
 
   const editableSnapshot = useMemo(() => ({
     headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks,
-    exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt, cropStyle, cropStyleOverrides,
-  }), [headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks, exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt, cropStyle, cropStyleOverrides]);
+    exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt, cropStyle, cropStyleOverrides, gridCells,
+  }), [headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks, exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt, cropStyle, cropStyleOverrides, gridCells]);
   const currentEditFingerprint = useMemo(() => JSON.stringify(editableSnapshot), [editableSnapshot]);
   const jsonState = !file ? null : downloadBaselineFingerprint == null
     ? 'not-downloaded'
@@ -409,7 +537,7 @@ function App() {
   }, [
     file, pages.length, loading, workflowKind, headerPct, footerPct, lines, lineMode,
     showGuides, selectedQuestionId, selectedLineId, selectedSegmentId,
-    segmentLabelOverrides, segmentPartFlags, cropStyle, cropStyleOverrides, lastSuggestionIds, viewMode, outputBreaks,
+    segmentLabelOverrides, segmentPartFlags, cropStyle, cropStyleOverrides, gridCells, lastSuggestionIds, viewMode, outputBreaks,
     exclusions, trimOverrides, globalReviewTrim, segmentationApproved,
     segmentationApprovedAt, approvalIssues, questionPayload, solutionPayload, solutionJsonSaved, reviewedRegionIds,
   ]);
@@ -451,6 +579,7 @@ function App() {
     setGlobalReviewTrim(snapshot.globalReviewTrim || { topExtra: 0, bottomExtra: 0 });
     setCropStyle(snapshot.cropStyle || 'standard');
     setCropStyleOverrides(snapshot.cropStyleOverrides || {});
+    setGridCells(snapshot.gridCells || []);
     setSegmentationApproved(Boolean(snapshot.segmentationApproved));
     setSegmentationApprovedAt(snapshot.segmentationApprovedAt || null);
     setApprovalIssues([]);
@@ -589,6 +718,7 @@ function App() {
       setLines([]);
       setCropStyle('auto');
       setCropStyleOverrides({});
+      setGridCells([]);
       setLastSuggestionIds([]);
       setSelectedQuestionId(null);
       setSelectedLineId(null);
@@ -616,13 +746,14 @@ function App() {
         setSegmentLabelOverrides(restoreSnapshot.segmentLabelOverrides || {});
         setSegmentPartFlags(restoreSnapshot.segmentPartFlags || {});
         setLastSuggestionIds(Array.isArray(restoreSnapshot.lastSuggestionIds) ? restoreSnapshot.lastSuggestionIds : []);
-        setViewMode(restoreSnapshot.viewMode === 'preview' ? 'preview' : 'segment');
+        setViewMode(['preview', 'grid'].includes(restoreSnapshot.viewMode) ? restoreSnapshot.viewMode : 'segment');
         setOutputBreaks(restoreSnapshot.outputBreaks || {});
         setExclusions(restoreSnapshot.exclusions || {});
         setTrimOverrides(restoreSnapshot.trimOverrides || {});
         setGlobalReviewTrim(restoreSnapshot.globalReviewTrim || { topExtra: 0, bottomExtra: 0 });
         setCropStyle(restoreSnapshot.cropStyle || 'standard');
         setCropStyleOverrides(restoreSnapshot.cropStyleOverrides || {});
+        setGridCells(restoreSnapshot.gridCells || []);
         setSegmentationApproved(Boolean(restoreSnapshot.segmentationApproved));
         setSegmentationApprovedAt(restoreSnapshot.segmentationApprovedAt || null);
         setApprovalIssues(Array.isArray(restoreSnapshot.approvalIssues) ? restoreSnapshot.approvalIssues : []);
@@ -679,6 +810,7 @@ function App() {
       segmentPartFlags,
       cropStyle,
       cropStyleOverrides,
+      gridCells,
       lastSuggestionIds,
       viewMode,
       outputBreaks,
@@ -849,7 +981,13 @@ function App() {
       segmentLabelOverrides,
       segmentPartFlags,
       lastSuggestionIds: [],
-      viewMode: 'segment',
+      viewMode: payload?.cropLayout === 'two-column-grid' ? 'grid' : 'segment',
+      gridCells: payload?.cropLayout === 'two-column-grid' ? (payload.questions || []).map((q) => ({
+        label: q.label, number: Number(String(q.label).replace(/\D/g, '')),
+        page: q.rectangularCrop?.page, x0: q.rectangularCrop?.leftFraction,
+        x1: q.rectangularCrop?.rightFraction, y0: q.rectangularCrop?.topFraction,
+        y1: q.rectangularCrop?.bottomFraction, detected: false,
+      })).filter((c) => Number.isFinite(c.page) && Number.isFinite(c.x0) && Number.isFinite(c.x1) && Number.isFinite(c.y0) && Number.isFinite(c.y1)) : [],
       cropStyle: payload?.cropStyle || 'standard',
       cropStyleOverrides: Object.fromEntries((payload?.questions || []).filter((q) => q.cropStyleOverride).map((q) => [q.label, q.cropStyleOverride])),
       outputBreaks,
@@ -2062,6 +2200,7 @@ function App() {
             <div className={`workflow-step ${(questionPayload && workflowKind === 'questions') || solutionJsonSaved ? 'done' : viewMode === 'preview' ? 'active' : ''}`}><span>{(questionPayload && workflowKind === 'questions') || solutionJsonSaved ? '✓' : '5'}</span><small>Save</small></div>
           </nav>
 
+          {file && <section className="compact-section"><div className="section-kicker">Unusual solution layouts</div><button className="ghost full" type="button" onClick={() => { const found = detectGridAnswerCells(pages); if (found.length) { setWorkflowKind('solutions'); setGridCells(found); setViewMode('grid'); } else setStatus('No confident two-column answer grid found. Continue with standard cropping.'); }}>Detect two-column solution grid</button>{gridCells.length > 0 && <button className="ghost compact" onClick={() => setViewMode('grid')}>Resume grid review ({gridCells.length} answers)</button>}</section>}
           {file && <section className="compact-section trial-tools"><div className="trial-tool-row"><button className="ghost compact" type="button" onClick={() => setHelpOpen(true)}>Shortcuts</button><button className="ghost compact" type="button" onClick={exportTroubleshootingFile}>Troubleshooting file</button><button className="ghost compact danger-soft" type="button" onClick={resetCurrentPaper}>Reset paper</button></div></section>}
 
           {viewMode === 'segment' ? (
@@ -2241,6 +2380,7 @@ function App() {
             </div>
           )}
           {loading && <div className="loading-card">Preparing pages…</div>}
+          {!!pages.length && !loading && viewMode === 'grid' && <GridSolutionsWorkspace pages={pages} cells={gridCells} setCells={setGridCells} sourceName={file?.name || 'solutions.pdf'} onExit={() => setViewMode('segment')} />}
           {!!pages.length && !loading && viewMode === 'segment' && (
             <div className="segmentation-workspace">
               <div className="panel-heading"><div><p className="eyebrow">Segmentation</p><h2>Rolling paper</h2></div><span className="panel-note">Focus only on question ownership</span></div>
