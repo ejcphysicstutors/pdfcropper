@@ -2438,8 +2438,15 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     const cleanBottom = detectedFooterCutoff(pageData, configuredBottom);
     if (cleanBottom <= cleanTop) continue;
 
-    const cleanSy = Math.floor(canvas.height * cleanTop);
-    const cleanEy = Math.ceil(canvas.height * cleanBottom);
+    // PDF.js renders antialiased ink over neighbouring pixels. The preparation
+    // view masks the removed footer, whereas the review re-rasterises the PDF.
+    // Never round the review crop OUTWARDS into the removed region: that can
+    // reintroduce the tops of footer characters (e.g. DHS 2026).
+    // A tiny inward guard is measured in rendered pixels, not percent, so it
+    // cannot remove a meaningful line of solution working.
+    const edgeGuardPx = Math.max(2, Math.min(4, Math.round(renderScale * 2)));
+    const cleanSy = Math.ceil(canvas.height * cleanTop);
+    const cleanEy = Math.max(cleanSy + 1, Math.floor(canvas.height * cleanBottom) - edgeGuardPx);
     const cleanHeight = Math.max(1, cleanEy - cleanSy);
     const cleanedPage = document.createElement('canvas');
     cleanedPage.width = canvas.width;
@@ -2455,8 +2462,9 @@ async function buildQuestionStrip(pages, region, headerPct, footerPct, globalRev
     const cleanSpan = cleanBottom - cleanTop;
     const localTop = clamp((top - cleanTop) / cleanSpan, 0, 1);
     const localBottom = clamp((bottom - cleanTop) / cleanSpan, 0, 1);
-    const sy = Math.floor(cleanedPage.height * localTop);
-    const ey = Math.ceil(cleanedPage.height * localBottom);
+    // Region endpoints are inset, not expanded, for the same reason.
+    const sy = Math.ceil(cleanedPage.height * localTop);
+    const ey = Math.floor(cleanedPage.height * localBottom);
     const sh = Math.max(1, ey - sy);
     const frag = document.createElement('canvas');
     frag.width = cleanedPage.width; frag.height = sh;
