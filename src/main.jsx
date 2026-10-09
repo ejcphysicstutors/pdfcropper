@@ -438,7 +438,7 @@ function GridPageCropEditor({ pageData, cell, onCropChange }) {
   </div>;
 }
 
-function GridSolutionsWorkspace({ pages, cells, setCells, sourceName, onExit }) {
+function GridSolutionsWorkspace({ pages, cells, setCells, sourceName, onExit, onSaved }) {
   const [selected, setSelected] = useState(0);
   const cell = cells[selected];
   const pageData = pages.find((p) => p.pageNumber === cell?.page);
@@ -475,6 +475,7 @@ function GridSolutionsWorkspace({ pages, cells, setCells, sourceName, onExit }) 
     anchor.download = `${sourceName.replace(/\.pdf$/i, '')}.solutions.json`;
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    onSaved?.(payload);
   }
   if (!cell) return <div className="loading-card">No grid cells detected. Return to whole-question cropping.</div>;
   return <div className="grid-solutions-workspace">
@@ -2250,7 +2251,7 @@ function App() {
         </div>
         {file && <div className="topbar-work-state"><span className="local-save-state">{lastLocalSaveAt ? `Saved locally ${new Date(lastLocalSaveAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Autosave pending'}</span><span className={`json-save-state ${jsonState || ''}`}>{jsonState === 'changed' ? '● Changes since last JSON' : jsonState === 'up-to-date' ? '✓ JSON up to date' : '○ JSON not yet downloaded'}</span></div>}
         {file && <div className="topbar-tools"><button className="ghost compact" type="button" onClick={undoEdit} disabled={!historyRef.current.length} title="Undo (Ctrl+Z)">↶ Undo</button><button className="ghost compact" type="button" onClick={redoEdit} disabled={!redoRef.current.length} title="Redo (Ctrl+Y)">↷ Redo</button><button className="ghost compact" type="button" onClick={() => setHelpOpen(true)}>?</button></div>}
-        {file && <button className="primary" onClick={workflowKind === 'solutions' && solutionJsonSaved ? uploadAnotherPaper : () => fileInputRef.current?.click()} disabled={loading}>{workflowKind === 'solutions' && solutionJsonSaved ? 'Upload another paper' : `Change ${workflowKind === 'solutions' ? 'solution' : 'files'}`}</button>}
+        {file && <button className="primary" onClick={workflowKind === 'solutions' && solutionJsonSaved ? uploadAnotherPaper : () => fileInputRef.current?.click()} disabled={loading}>{workflowKind === 'solutions' && solutionJsonSaved ? 'Upload new paper' : `Change ${workflowKind === 'solutions' ? 'solution' : 'files'}`}</button>}
         <input ref={fileInputRef} className="hidden-input" type="file" accept="application/pdf,.pdf,application/json,.json" multiple onChange={(e) => handleIntakeFiles(e.target.files)} />
       </header>
       {statusVisible && status && <div className={`status-toast ${/cannot|could not|fix|missing|different|expected|failed|please/i.test(status) ? 'alert' : 'ok'}`} role="status"><span>{/cannot|could not|fix|missing|different|expected|failed|please/i.test(status) ? '!' : '✓'}</span><p>{status}</p><button type="button" aria-label="Dismiss message" onClick={() => setStatusVisible(false)}>×</button></div>}
@@ -2447,7 +2448,7 @@ function App() {
             </div>
           )}
           {loading && <div className="loading-card">Preparing pages…</div>}
-          {!!pages.length && !loading && viewMode === 'grid' && <GridSolutionsWorkspace pages={pages} cells={gridCells} setCells={setGridCells} sourceName={file?.name || 'solutions.pdf'} onExit={() => setViewMode('segment')} />}
+          {!!pages.length && !loading && viewMode === 'grid' && <GridSolutionsWorkspace pages={pages} cells={gridCells} setCells={setGridCells} sourceName={file?.name || 'solutions.pdf'} onExit={() => setViewMode('segment')} onSaved={(payload) => { setWorkflowKind('solutions'); setSolutionPayload(payload); setSolutionJsonSaved(true); setStatus('Grid solutions JSON downloaded. You can upload a new paper.'); }} />}
           {!!pages.length && !loading && viewMode === 'segment' && (
             <div className="segmentation-workspace">
               <div className="panel-heading"><div><p className="eyebrow">Segmentation</p><h2>Rolling paper</h2></div><span className="panel-note">Focus only on question ownership</span></div>
