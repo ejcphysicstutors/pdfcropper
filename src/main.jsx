@@ -13,7 +13,7 @@ const END = 'question-end';
 const PART = 'part';
 const PAGE_CONTENT_WIDTH = 706;
 const PAGE_CONTENT_HEIGHT = 1035;
-const APP_VERSION = '0.9.4-adaptive-question-boundaries';
+const APP_VERSION = '0.9.5-boundary-diagnostics';
 
 const LOCAL_DRAFT_DB = 'prelim-cropper-local-v1';
 const LOCAL_DRAFT_STORE = 'drafts';
@@ -517,6 +517,7 @@ function App() {
   const [segmentPartFlags, setSegmentPartFlags] = useState({});
   const [lastSuggestionIds, setLastSuggestionIds] = useState([]);
   const [viewMode, setViewMode] = useState('segment');
+  const [manualApproval, setManualApproval] = useState(false);
   // Whole-question crops are the default; subpart boundaries remain available on demand.
   const [detailedQuestionIds, setDetailedQuestionIds] = useState([]);
   const [cropStyle, setCropStyle] = useState('auto');
@@ -1830,6 +1831,8 @@ function App() {
         approved: approvalOverride?.approved ?? segmentationApproved,
         approvedAt: approvalOverride?.approvedAt ?? segmentationApprovedAt,
         structuralIssueCount: validateSegmentation().length,
+        manualOverride: Boolean(manualApproval && (approvalOverride?.approved ?? segmentationApproved)),
+        manualOverrideReason: manualApproval && (approvalOverride?.approved ?? segmentationApproved) ? 'Teacher reviewed boundary warnings and explicitly accepted them' : null,
       },
       lines: [...activeLines].sort(comparePos).map((line) => ({
         page: line.page,
@@ -1864,9 +1867,9 @@ function App() {
   function exportSegmentation() {
     if (!file || !pages.length) return;
     const issues = validateSegmentation();
-    if (issues.length) {
+    if (issues.length && !(segmentationApproved && manualApproval)) {
       setApprovalIssues(issues);
-      setStatus('Cannot save yet. Fix the flagged segmentation issues first.');
+      setStatus('Cannot save yet. Review the flagged issues or use manual approval.');
       return;
     }
 
@@ -2039,8 +2042,24 @@ function App() {
     const parts = ordered.filter((line) => line.kind === PART);
 
     if (!starts.length) issues.push({ type: 'paper', message: 'No question starts found.' });
+    // A raw count mismatch is a summary, not a location. The checks below
+    // attach each missing/extra boundary to its own question or END line.
     if (starts.length !== ends.length) {
-      issues.push({ type: 'paper', message: `${starts.length} question starts but ${ends.length} question ends. Check for an extra or missing START/END line.` });
+      const affected = starts.map((start, index) => {
+        const next = starts[index + 1];
+        const owned = ends.filter((end) => comparePos(end, start) > 0 && (!next || comparePos(end, next) < 0));
+        return { start, index, owned, next };
+      }).filter(({ start, next, owned }) =>
+        (cropStyleFor(start, next, owned[0]) !== 'continuous' || !next) && owned.length !== 1);
+      const orphan = ends.filter((end) => !starts.some((start, index) =>
+        comparePos(end, start) > 0 && (!starts[index + 1] || comparePos(end, starts[index + 1]) < 0)));
+      const locations = affected.map(({ start, index }) => `Q${index + 1} (page ${start.page})`);
+      orphan.forEach((end) => locations.push(`unattached END on page ${end.page}`));
+      if (locations.length) issues.push({ type: 'summary',
+        message: `${starts.length} START lines and ${ends.length} END lines. ${locations.length ? `Inspect: ${locations.join(', ')}.` : 'Some questions may use linked boundaries; check the question-specific warnings below.'}`,
+        regionId: affected[0]?.start.id, lineId: !affected.length ? orphan[0]?.id : undefined,
+        page: affected[0]?.start.page || orphan[0]?.page,
+      });
     }
 
     if (workflowKind !== 'solutions') {
@@ -2066,9 +2085,9 @@ function App() {
       const matchingEnds = ends.filter((line) => comparePos(line, start) > 0 && (!nextStart || comparePos(line, nextStart) < 0));
       if (cropStyleFor(start, nextStart, matchingEnds[0]) === 'continuous' && nextStart) return;
       if (matchingEnds.length === 0) {
-        issues.push({ type: 'question', regionId: start.id, message: `${start.label || `Q${index + 1}`} has no explicit END line.` });
+        issues.push({ type: 'question', regionId: start.id, page: start.page, message: `Q${index + 1} (page ${start.page}) has no explicit END line before ${nextStart ? `Q${index + 2}` : 'the end of the paper'}.` });
       } else if (matchingEnds.length > 1) {
-        issues.push({ type: 'question', regionId: start.id, message: `${start.label || `Q${index + 1}`} has ${matchingEnds.length} END lines before the next question. Remove the extra END line.` });
+        issues.push({ type: 'question', regionId: start.id, lineId: matchingEnds[1]?.id, page: matchingEnds[1]?.page, message: `Q${index + 1} has ${matchingEnds.length} END lines before the next question. Inspect the highlighted extra END.` });
       }
     });
 
@@ -2088,7 +2107,7 @@ function App() {
 
     regions.forEach((region, regionIndex) => {
       if (!region.endExplicit) {
-        issues.push({ type: 'question', regionId: region.id, message: `${region.label} is using an inferred END. Add or confirm the end line.` });
+        issues.push({ type: 'question', regionId: region.id, page: region.start.page, message: `${region.label} (starts on page ${region.start.page}) is using an inferred END. Check the end of this question.` });
       }
       if (workflowKind === 'solutions') {
         const expectedSegments = authoritativeQuestionSegments(questionPayload?.questions?.[regionIndex]);
@@ -2179,10 +2198,23 @@ function App() {
       return;
     }
     const now = new Date().toISOString();
+    setManualApproval(false);
     setSegmentationApproved(true);
     setSegmentationApprovedAt(now);
     setApprovalIssues([]);
     setStatus(workflowKind === 'solutions' ? 'Solution blocks approved and reconciled to the question JSON. Review layout, then save the solution JSON.' : 'Questions and parts approved. You can now review page layout and save the segmentation JSON.');
+  }
+
+  function approveWithWarnings() {
+    const issues = validateSegmentation();
+    if (!issues.length) { approveSegmentation(); return; }
+    const confirmed = window.confirm(`There are ${issues.length} validation warning(s).\n\nOnly continue if you have reviewed the flagged boundaries and verified that the solution/question crops are correct. The exported JSON will record a manual override.\n\nApprove despite these warnings?`);
+    if (!confirmed) return;
+    setManualApproval(true);
+    setApprovalIssues(issues);
+    setSegmentationApproved(true);
+    setSegmentationApprovedAt(new Date().toISOString());
+    setStatus('Manually approved with warnings recorded. Review the final layout before saving.');
   }
 
   function updateSegmentLabel(segmentId, value) {
@@ -2241,9 +2273,9 @@ function App() {
   function enterPreview() {
     if (!regions.length) return;
     const issues = validateSegmentation();
-    if (issues.length) {
+    if (issues.length && !(segmentationApproved && manualApproval)) {
       setApprovalIssues(issues);
-      setStatus('Fix the flagged question/part issues before reviewing page layout.');
+      setStatus('Review flagged issues or manually approve them before page layout.');
       return;
     }
 
@@ -2252,6 +2284,7 @@ function App() {
     // Review page layout as a second confirmation of the same decision.
     if (!segmentationApproved) {
       const approvedAt = new Date().toISOString();
+      setManualApproval(false);
       setSegmentationApproved(true);
       setSegmentationApprovedAt(approvedAt);
       setApprovalIssues([]);
@@ -2428,7 +2461,7 @@ function App() {
                 {!!regions.length && segmentationApproved && <button className="approval-confirmed full" type="button" disabled>{workflowKind === 'solutions' ? '✓ Solution matches approved' : '✓ Whole questions approved'}</button>}
                 {!!regions.length && liveApprovalIssues.length > 0 && (
                   <details className="approval-issues compact-approval-issues">
-                    <summary>{liveApprovalIssues.length} issue{liveApprovalIssues.length === 1 ? '' : 's'} to fix before approval</summary>
+                    <summary>{liveApprovalIssues.length} boundary warning{liveApprovalIssues.length === 1 ? '' : 's'} — view locations</summary>
                     <ul>{liveApprovalIssues.slice(0, 5).map((issue, index) => (
                       <li key={`${issue.message}-${index}`}>
                         <button type="button" className={`issue-jump ${issue.regionId || issue.lineId || issue.page ? 'clickable' : ''}`} onClick={() => jumpToIssue(issue)} disabled={!issue.regionId && !issue.lineId && !issue.page}>
@@ -2441,6 +2474,8 @@ function App() {
                     {liveApprovalIssues.length > 5 && <small>+ {liveApprovalIssues.length - 5} more</small>}
                   </details>
                 )}
+                {!!regions.length && liveApprovalIssues.length > 0 && !segmentationApproved && <button type="button" className="ghost full" onClick={approveWithWarnings}>I checked these — approve with warnings</button>}
+                {!!regions.length && segmentationApproved && manualApproval && <p className="small">Manual approval: validation warnings will be recorded in the saved JSON.</p>}
                 <button className={`${segmentationApproved || liveApprovalIssues.length === 0 ? 'primary' : 'ghost'} full`} onClick={enterPreview} disabled={!regions.length}>Review page layout →</button>
               </section>
             </>
@@ -2449,7 +2484,7 @@ function App() {
               <section className="compact-section"><button className="ghost full" onClick={() => setViewMode('segment')}>← Back to questions</button></section>
               <section className="compact-section"><div className="section-heading-row"><h2>{workflowKind === 'solutions' ? 'Solution parents' : 'Questions'}</h2><span className="review-count">{reviewedRegionIds.length}/{regions.length} viewed</span></div><div className="region-list preview-region-list">{regions.map((region) => { const visited = reviewedRegionIds.includes(region.id); const current = selectedQuestionId === region.id; return <button key={region.id} className={`region-row ${current ? 'selected' : ''}`} onClick={() => setSelectedQuestionId(region.id)}><span className="region-name">{region.label}</span><span className={`visit-state ${current ? 'current' : visited ? 'visited' : ''}`}>{current ? '●' : visited ? '✓' : '○'}</span></button>; })}</div></section>
               <section className="compact-section save-section">
-                <button className="primary full" onClick={exportSegmentation} disabled={liveApprovalIssues.length > 0}>{workflowKind === 'solutions' ? 'Save solution JSON' : 'Save question JSON'}</button>
+                <button className="primary full" onClick={exportSegmentation} disabled={liveApprovalIssues.length > 0 && !(segmentationApproved && manualApproval)}>{workflowKind === 'solutions' ? 'Save solution JSON' : 'Save question JSON'}</button>
                 <p className="small">Saves the approved source boundaries and reviewed page layout.</p>
                 {workflowKind === 'questions' && questionPayload && <div className="completion-card"><strong>✓ Question JSON saved</strong><span>{questionPayload.sourceFile || file?.name}</span><button className="ghost full" type="button" onClick={continueWithSolutions}>{awaitingSolutionPdf ? 'Choose solution PDF…' : 'Continue with solutions →'}</button><button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
                 {workflowKind === 'solutions' && solutionJsonSaved && <div className="completion-card"><strong>✓ Solution JSON saved</strong><span>{solutionPayload?.sourceFile || file?.name}</span>{questionPayload && solutionPayload && <button className="ghost full" type="button" onClick={downloadCombinedPackage}>Download both JSONs</button>}<button className="ghost full" type="button" onClick={uploadAnotherPaper}>Upload another paper</button></div>}
