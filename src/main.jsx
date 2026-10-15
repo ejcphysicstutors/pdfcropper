@@ -3097,7 +3097,14 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   const [selectedBreakIndex, setSelectedBreakIndex] = useState(null);
   const [breakWarning, setBreakWarning] = useState('');
   // Automatic suggestions are preview-only; never persist them as manual breaks.
-  const [paginationMode, setPaginationMode] = useState('original');
+  // A mode choice belongs to a question, not to the entire preview session.
+  // When returning to a question with saved manual breaks, restore that layout
+  // instead of silently showing its original source-page joins.
+  const [paginationPreference, setPaginationPreference] = useState(null);
+  const paginationMode = paginationPreference?.regionId === region?.id
+    ? paginationPreference.mode
+    : (savedBreaks?.length ? 'manual' : 'original');
+  const setPaginationMode = (mode) => setPaginationPreference({ regionId: region?.id, mode });
 
   useEffect(() => {
     function onKeyDown(event) {
@@ -3115,7 +3122,6 @@ function PreviewWorkspace({ pages, region, headerPct, footerPct, hasPrevious, ha
   useEffect(() => {
     setSelectedBreakIndex(null);
     setBreakWarning('');
-    setPaginationMode('original');
   }, [region?.id]);
 
   useEffect(() => {
