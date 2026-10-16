@@ -681,3 +681,9 @@ h2 { margin: 0 0 13px; font-size: .96rem; } h3 { margin: 0; font-size: .95rem; }
 .grid-handle-bl { left: -9px; bottom: -9px; cursor: nesw-resize; }
 .grid-handle-br { right: -9px; bottom: -9px; cursor: nwse-resize; }
 .grid-crop-result-title { margin: 14px 0 8px; font-size: 14px; }
+
+/* Explicitly missing school-provided solutions */
+.solution-availability-list { display: grid; gap: 5px; max-height: 260px; overflow-y: auto; margin-top: 10px; }
+.solution-availability-row { display: grid; grid-template-columns: 18px minmax(40px, 0.5fr) minmax(120px, 2fr); align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid var(--line, #d9dce4); border-radius: 7px; font-size: 12px; cursor: pointer; }
+.solution-availability-row input { margin: 0; accent-color: #7c3aed; }
+.solution-availability-row span:last-child { color: var(--muted, #606875); }

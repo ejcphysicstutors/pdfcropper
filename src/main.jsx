@@ -534,6 +534,7 @@ function App() {
   const [workflowKind, setWorkflowKind] = useState('questions');
   const [questionPayload, setQuestionPayload] = useState(null);
   const [solutionPayload, setSolutionPayload] = useState(null);
+  const [unavailableSolutions, setUnavailableSolutions] = useState([]);
   const [solutionJsonSaved, setSolutionJsonSaved] = useState(false);
   const fileInputRef = useRef(null);
   const restoringDraftRef = useRef(false);
@@ -555,9 +556,9 @@ function App() {
   const questionAuthorityRef = useRef(null);
 
   const editableSnapshot = useMemo(() => ({
-    headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks,
+    headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, unavailableSolutions, outputBreaks,
     exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt, cropStyle, cropStyleOverrides, gridCells,
-  }), [headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, outputBreaks, exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt, cropStyle, cropStyleOverrides, gridCells]);
+  }), [headerPct, footerPct, lines, segmentLabelOverrides, segmentPartFlags, unavailableSolutions, outputBreaks, exclusions, trimOverrides, globalReviewTrim, segmentationApproved, segmentationApprovedAt, cropStyle, cropStyleOverrides, gridCells]);
   const currentEditFingerprint = useMemo(() => JSON.stringify(editableSnapshot), [editableSnapshot]);
   const jsonState = !file ? null : downloadBaselineFingerprint == null
     ? 'not-downloaded'
@@ -606,7 +607,7 @@ function App() {
   }, [
     file, pages.length, loading, workflowKind, headerPct, footerPct, lines, lineMode,
     showGuides, selectedQuestionId, selectedLineId, selectedSegmentId,
-    segmentLabelOverrides, segmentPartFlags, cropStyle, cropStyleOverrides, gridCells, lastSuggestionIds, viewMode, outputBreaks,
+    segmentLabelOverrides, segmentPartFlags, unavailableSolutions, cropStyle, cropStyleOverrides, gridCells, lastSuggestionIds, viewMode, outputBreaks,
     exclusions, trimOverrides, globalReviewTrim, segmentationApproved,
     segmentationApprovedAt, approvalIssues, questionPayload, solutionPayload, solutionJsonSaved, reviewedRegionIds,
   ]);
@@ -642,6 +643,7 @@ function App() {
     setLines(Array.isArray(snapshot.lines) ? snapshot.lines : []);
     setSegmentLabelOverrides(snapshot.segmentLabelOverrides || {});
     setSegmentPartFlags(snapshot.segmentPartFlags || {});
+    setUnavailableSolutions(snapshot.unavailableSolutions || []);
     setOutputBreaks(snapshot.outputBreaks || {});
     setExclusions(snapshot.exclusions || {});
     setTrimOverrides(snapshot.trimOverrides || {});
@@ -791,6 +793,7 @@ function App() {
       setSelectedLineId(null);
       setSelectedSegmentId(null);
       setOutputBreaks({});
+      setUnavailableSolutions([]);
       setExclusions({});
       setTrimOverrides({});
       setSegmentationApproved(false);
@@ -812,6 +815,7 @@ function App() {
         setSelectedSegmentId(restoreSnapshot.selectedSegmentId || null);
         setSegmentLabelOverrides(restoreSnapshot.segmentLabelOverrides || {});
         setSegmentPartFlags(restoreSnapshot.segmentPartFlags || {});
+        setUnavailableSolutions(restoreSnapshot.unavailableSolutions || []);
         setLastSuggestionIds(Array.isArray(restoreSnapshot.lastSuggestionIds) ? restoreSnapshot.lastSuggestionIds : []);
         setViewMode(['preview', 'grid'].includes(restoreSnapshot.viewMode) ? restoreSnapshot.viewMode : 'segment');
         setOutputBreaks(restoreSnapshot.outputBreaks || {});
@@ -875,6 +879,7 @@ function App() {
       selectedSegmentId,
       segmentLabelOverrides,
       segmentPartFlags,
+      unavailableSolutions,
       cropStyle,
       cropStyleOverrides,
       gridCells,
@@ -1071,6 +1076,7 @@ function App() {
       approvalIssues: [],
       questionPayload: questionAuthority,
       solutionPayload: solutionPayloadForSnapshot,
+      unavailableSolutions: kind === 'solutions' ? (payload?.questions || []).filter(q => q.solutionStatus === 'unavailable' || q.available === false).map(q => q.questionRef || q.label) : [],
       solutionJsonSaved: false,
       reviewedRegionIds: [],
       _fromSegmentationJson: true,
@@ -1658,7 +1664,9 @@ function App() {
       // each render, so dragging that START moves both sides atomically.
       const linked = Boolean(nextStart && resolvedStyle === 'continuous');
       const finalEnd = linked ? { ...nextStart, kind: END, linkedTo: nextStart.id } : (end || { ...fallbackEnd, id: null, kind: END, virtual: true });
-      const expectedQuestion = workflowKind === 'solutions' ? questionPayload?.questions?.[index] : null;
+      const expectedQuestion = workflowKind === 'solutions'
+        ? (questionPayload?.questions || []).filter(question => !unavailableSolutions.includes(question.label))[index]
+        : null;
       // Non-manual detector labels are hints, not approval requirements.
       // In whole-question mode the ordered starts define Q1, Q2, ... .
       const fallbackLabel = expectedQuestion?.label || (start.manualLabel ? (start.label || '') : `Q${index + 1}`);
@@ -1759,7 +1767,7 @@ function App() {
       ];
       return { id: start.id, start, end: finalEnd, endExplicit: Boolean(end) || linked, cropStyleResolved: resolvedStyle, linked, label: fallbackLabel, parts, segments, navigationParts };
     });
-  }, [activeLines, lines, footerPct, pages, segmentLabelOverrides, segmentPartFlags, workflowKind, questionPayload, cropStyle, cropStyleOverrides]);
+  }, [activeLines, lines, footerPct, pages, segmentLabelOverrides, segmentPartFlags, workflowKind, questionPayload, unavailableSolutions, cropStyle, cropStyleOverrides]);
 
   useEffect(() => {
     if (!regions.length) { setSelectedQuestionId(null); return; }
@@ -1774,6 +1782,19 @@ function App() {
     setSegmentationApprovedAt(null);
     setApprovalIssues([]);
   }, [lines, headerPct, footerPct, segmentLabelOverrides, segmentPartFlags]);
+
+  const availableSolutionQuestions = workflowKind === 'solutions'
+    ? (questionPayload?.questions || []).filter(question => !unavailableSolutions.includes(question.label))
+    : [];
+
+  function toggleSolutionUnavailable(label) {
+    setUnavailableSolutions(current => current.includes(label)
+      ? current.filter(value => value !== label)
+      : [...current, label]);
+    setSegmentationApproved(false);
+    setSegmentationApprovedAt(null);
+    setSolutionJsonSaved(false);
+  }
 
   function buildSegmentationPayload(documentKind = workflowKind, approvalOverride = null) {
     if (!file || !pages.length) return null;
@@ -1795,9 +1816,23 @@ function App() {
         order: ['crop source question using start/end', 'apply teacher-selected Page Preparation crop bounds and explicit review overrides (no automatic trim)', 'remove every excludedOutputRanges band', 'paginate using outputPageBreakFractions'],
         exclusionPolicy: 'Excluded ranges are not part of the published question or solution and MUST NOT appear in question-bank crops, previews, exports or searchable extracted content.',
       },
-      questions: regions.map((region, index) => ({
-        questionRef: isSolution ? (questionPayload?.questions?.[index]?.label || region.label) : undefined,
-        label: isSolution ? (questionPayload?.questions?.[index]?.label || region.label) : region.label,
+      questions: (isSolution ? (questionPayload?.questions || []).map((question) => {
+        const unavailable = unavailableSolutions.includes(question.label);
+        const availableIndex = availableSolutionQuestions.findIndex(item => item.label === question.label);
+        const region = unavailable ? null : regions[availableIndex];
+        return { question, unavailable, region };
+      }) : regions.map((region) => ({ question: null, unavailable: false, region }))).map(({ question, unavailable, region }) => unavailable || !region ? {
+        questionRef: question?.label || null,
+        label: question?.label || null,
+        solutionStatus: 'unavailable',
+        available: false,
+        start: null, end: null, parts: [], segments: [],
+        outputPageBreakFractions: [], excludedOutputRanges: [],
+        outputCrop: null, pageTrimOverrides: [],
+      } : ({
+        questionRef: isSolution ? (question?.label || region.label) : undefined,
+        label: isSolution ? (question?.label || region.label) : region.label,
+        ...(isSolution ? { solutionStatus: 'available', available: true } : {}),
         start: { page: region.start.page, yFractionFromTop: round4(region.start.y) },
         end: { page: region.end.page, yFractionFromTop: round4(region.end.y), explicit: region.endExplicit },
         cropStyleResolved: region.cropStyleResolved,
@@ -1846,10 +1881,12 @@ function App() {
       reconciliation: isSolution ? {
         expectedQuestionCount: questionPayload?.questions?.length || 0,
         matchedQuestionCount: regions.length,
-        exactParentMatch: Boolean(questionPayload?.questions?.length && questionPayload.questions.length === regions.length),
+        unavailableQuestionCount: unavailableSolutions.length,
+        unavailableQuestionLabels: unavailableSolutions,
+        exactParentMatch: Boolean(questionPayload?.questions?.length && availableSolutionQuestions.length === regions.length),
       } : undefined,
       notes: isSolution
-        ? 'Solution boundaries are matched in order to the approved question-paper question list. Excluded output ranges MUST be removed from published solution crops and question-bank exports.'
+        ? 'Missing solutions are explicitly recorded as solutionStatus=unavailable with null crop boundaries. Available blocks are matched to the remaining question labels in order. Solution boundaries are matched in order to the approved question-paper question list. Excluded output ranges MUST be removed from published solution crops and question-bank exports.'
         : 'Question starts/ends define source ownership. Excluded output ranges MUST be removed from published question crops and question-bank exports; they do not change source question ownership.',
     };
   }
@@ -1937,6 +1974,7 @@ function App() {
     setSelectedSegmentId(null);
     setSegmentLabelOverrides({});
     setSegmentPartFlags({});
+    setUnavailableSolutions([]);
     setOutputBreaks({});
     setExclusions({});
     setTrimOverrides({});
@@ -1980,7 +2018,7 @@ function App() {
       headerPct, footerPct,
       boundaryCounts: { start: lines.filter((line) => line.kind === START).length, end: lines.filter((line) => line.kind === END).length, part: lines.filter((line) => line.kind === PART).length },
       lines: lines.map(({ id, page, y, kind, label, manualLabel, source }) => ({ id, page, y, kind, label, manualLabel, source })),
-      segmentLabelOverrides, segmentPartFlags, outputBreaks, exclusions, trimOverrides, globalReviewTrim,
+      segmentLabelOverrides, segmentPartFlags, unavailableSolutions, outputBreaks, exclusions, trimOverrides, globalReviewTrim,
       segmentationApproved, segmentationApprovedAt,
       validationIssues: validateSegmentation().map(({ type, regionId, message, expectedLabels }) => ({ type, regionId, message, expectedLabels })),
       reviewedRegionIds,
@@ -2110,7 +2148,7 @@ function App() {
         issues.push({ type: 'question', regionId: region.id, page: region.start.page, message: `${region.label} (starts on page ${region.start.page}) is using an inferred END. Check the end of this question.` });
       }
       if (workflowKind === 'solutions') {
-        const expectedSegments = authoritativeQuestionSegments(questionPayload?.questions?.[regionIndex]);
+        const expectedSegments = authoritativeQuestionSegments(availableSolutionQuestions[regionIndex]);
         const actualSegments = region.segments.filter((segment) => segment.isPart !== false);
         if (detailedQuestionIds.includes(region.id) && expectedSegments.length && actualSegments.length !== expectedSegments.length) {
           const expectedLabels = expectedSegments.map((segment, segmentIndex) => {
@@ -2133,10 +2171,10 @@ function App() {
     });
 
     if (workflowKind === 'solutions' && questionPayload?.questions?.length) {
-      const expected = questionPayload.questions.map((question) => question.label);
+      const expected = availableSolutionQuestions.map((question) => question.label);
       const actual = regions.map((region) => region.label);
       if (actual.length !== expected.length) {
-        issues.push({ type: 'paper', message: `Solution reconciliation expected ${expected.length} parent questions from the question JSON, but found ${actual.length}.` });
+        issues.push({ type: 'paper', message: `Solution reconciliation expected ${expected.length} available solution blocks (${unavailableSolutions.length} marked unavailable), but found ${actual.length}.` });
       } else {
         actual.forEach((label, index) => {
           if (label !== expected[index]) issues.push({ type: 'question', regionId: regions[index]?.id, message: `Solution block ${index + 1} must match ${expected[index]}, but is labelled ${label}.` });
@@ -2376,7 +2414,18 @@ function App() {
 
               <section className="compact-section question-section">
                 <div className="section-heading-row"><div><div className="section-kicker">{workflowKind === 'solutions' ? 'Match to question JSON' : 'Check the paper'}</div><h2>{workflowKind === 'solutions' ? 'Solution parents' : 'Questions'}</h2></div><span className={`question-count ${segmentationApproved ? 'complete' : liveApprovalIssues.length ? 'warn' : ''}`}>{regions.length}</span></div>
-                {workflowKind === 'solutions' && questionPayload && <p className="review-progress-copy">Expected: {questionPayload.questions.length} parent questions. Parent identity is inherited from the approved question JSON.</p>}
+                {workflowKind === 'solutions' && questionPayload && <div className="whole-question-choice">
+                  <strong>Solution availability</strong>
+                  <p className="small">Mark each question whose solution is missing from this school's answer PDF. Do not create a blank crop. The remaining solution blocks will match only the available questions, in order.</p>
+                  <div className="solution-availability-list">{questionPayload.questions.map(question => (
+                    <label key={question.label} className="solution-availability-row">
+                      <input type="checkbox" checked={unavailableSolutions.includes(question.label)} onChange={() => toggleSolutionUnavailable(question.label)} />
+                      <span>{question.label}</span>
+                      <span>{unavailableSolutions.includes(question.label) ? 'Unavailable — skip crop' : 'Solution available'}</span>
+                    </label>
+                  ))}</div>
+                  <p className="small">{unavailableSolutions.length} unavailable · {availableSolutionQuestions.length} solution crops expected · {regions.length} detected.</p>
+                </div>}
                 {!regions.length && <p className="small">Questions will appear here after detection.</p>}
                 {!!regions.length && liveApprovalIssues.length === 0 && !segmentationApproved && <p className="review-progress-copy">Edit as you go. When everything looks right, approve the whole paper once.</p>}
                 {!!regions.length && segmentationApproved && <p className="review-progress-copy approval-ok">✓ Questions and parts approved</p>}
